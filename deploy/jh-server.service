@@ -1,0 +1,14 @@
+[Unit]
+Description=JH Game Server
+After=network.target mysqld.service mariadb.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jh-server
+ExecStart=/opt/jh-server/build/jh_server --config /opt/jh-server/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

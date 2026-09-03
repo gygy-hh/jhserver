@@ -1,0 +1,21 @@
+{
+  "huoDong": [],
+  "update": {
+    "apk_file": "",
+    "apk_update": false,
+    "apk_url": "",
+    "asset_update": false,
+    "asset_version": 0,
+    "force_update": true,
+    "game_version": 478,
+    "json_download_url": "10.151.207.41/update/json/1.json",
+    "json_update": true,
+    "json_url": "10.151.207.41/update/json/1.json",
+    "json_version": 1,
+    "min_program_version": 520,
+    "need_update": true,
+    "program_version": 520,
+    "update_notice": ""
+  },
+  "version": 1
+}

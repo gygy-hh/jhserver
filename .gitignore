@@ -1,0 +1,48 @@
+# Secrets and local ops
+服务器账号与部署说明.md
+config.json
+config.prod.json
+data/save_keys.json
+data/accounts.json
+data/sms_codes.json
+data/saves/
+data/mails/
+
+# Build
+build/
+build-linux/
+dist/
+out/
+.vs/
+CMakeUserPresets.json
+*.exe
+*.pdb
+*.obj
+*.o
+compile_commands.json
+
+# Logs and junk
+*.log
+sms_out.log
+sms_test.log
+_test_body.txt
+_login_body.txt
+_pwd.json
+_srv_err.txt
+_srv_out.txt
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+*.user
+*.suo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Reverse-engineering dumps (not needed to build)
+libcocos2dcpp.c
+libcocos2dcpp.lst

@@ -1,0 +1,17 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: jh-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "change_me_root"
+      MYSQL_DATABASE: jh_game
+      MYSQL_USER: jh_user
+      MYSQL_PASSWORD: "change_me"
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - jh_mysql_data:/var/lib/mysql
+
+volumes:
+  jh_mysql_data:

@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JH Game Server Admin</title>
+<style>
+:root{--bg:#0f1419;--card:#1a2332;--border:#2d3a4d;--text:#e7ecf3;--muted:#8b9cb3;--accent:#3b82f6;--danger:#ef4444}
+*{box-sizing:border-box}body{margin:0;font-family:Segoe UI,system-ui,sans-serif;background:var(--bg);color:var(--text)}
+header{padding:20px 24px;border-bottom:1px solid var(--border);background:#111827}
+header h1{margin:0;font-size:20px;font-weight:600}
+header p{margin:4px 0 0;color:var(--muted);font-size:13px}
+.wrap{max-width:1200px;margin:0 auto;padding:24px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px}
+.card .label{color:var(--muted);font-size:12px;margin-bottom:8px}
+.card .value{font-size:28px;font-weight:700}
+.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tab{padding:10px 16px;border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:8px;cursor:pointer}
+.tab.active{background:var(--accent);border-color:var(--accent)}
+.panel{display:none}.panel.active{display:block}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+th,td{padding:12px 14px;text-align:left;border-bottom:1px solid var(--border);font-size:14px}
+th{background:#111827;color:var(--muted);font-weight:600}
+tr:last-child td{border-bottom:none}
+.btn{padding:6px 12px;border:none;border-radius:6px;cursor:pointer;font-size:13px;margin-right:6px}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-danger{background:var(--danger);color:#fff}
+.toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:20px;z-index:10}
+.modal.open{display:flex}
+.modal-box{background:var(--card);border:1px solid var(--border);border-radius:12px;max-width:900px;width:100%;max-height:80vh;overflow:auto;padding:20px}
+pre{white-space:pre-wrap;word-break:break-all;background:#111827;padding:12px;border-radius:8px;font-size:12px;max-height:50vh;overflow:auto}
+.msg{color:var(--danger);font-size:13px;min-height:18px;margin-bottom:8px}
+.form-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:flex-end}
+.form-row label{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted)}
+.form-row input,.form-row textarea{padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:#111827;color:var(--text);min-width:180px}
+.form-row textarea{min-width:320px;min-height:72px;font-family:Consolas,monospace}
+.hint{color:var(--muted);font-size:12px;margin-bottom:12px}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
+.badge-pending{background:#854d0e;color:#fef3c7}
+.badge-delivered{background:#14532d;color:#bbf7d0}
+</style>
+</head>
+<body>
+<header>
+  <h1>JH Game Server 管理后台</h1>
+  <p>账号、云存档、邮件发放与服务状态</p>
+</header>
+<div class="wrap">
+  <div class="cards" id="statsCards"></div>
+  <div class="tabs">
+    <button class="tab active" data-tab="accounts">账号</button>
+    <button class="tab" data-tab="saves">云存档</button>
+    <button class="tab" data-tab="mails">邮件</button>
+    <button class="tab" data-tab="update">在线更新</button>
+    <button class="tab" data-tab="config">服务配置</button>
+  </div>
+  <div class="msg" id="msg"></div>
+  <div class="panel active" id="panel-accounts">
+    <div class="toolbar"><strong>账号列表</strong><button class="btn btn-primary" id="btnRefreshAccounts">刷新</button></div>
+    <table><thead><tr><th>账号</th><th>ID</th><th>MTT</th><th>密码</th><th>操作</th></tr></thead><tbody id="accountsBody"></tbody></table>
+  </div>
+  <div class="panel" id="panel-saves">
+    <div class="toolbar"><strong>云存档</strong><button class="btn btn-primary" id="btnRefreshSaves">刷新</button></div>
+    <table><thead><tr><th>账号</th><th>区服</th><th>大小</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="savesBody"></tbody></table>
+  </div>
+  <div class="panel" id="panel-mails">
+    <div class="card" style="margin-bottom:16px">
+      <strong>发送邮件（物品奖励）</strong>
+      <p class="hint">原版邮箱流程：待发邮件在 downloadSave 时写入 dat.json.myGift，客户端在邮箱点击领取（recvMail）。save_index 默认使用区服 area。</p>
+      <div class="form-row">
+        <label>账号<input id="mailAcc" placeholder="手机号 / 账号"></label>
+        <label>区服<input id="mailArea" type="number" min="1" value="1" placeholder="1"></label>
+        <label>描述<input id="mailDesp" placeholder="系统奖励" value="系统奖励"></label>
+        <label>物品 JSON<textarea id="mailItems" placeholder='{"9716":10}'>{&quot;9716&quot;:10}</textarea></label>
+        <button class="btn btn-primary" id="btnSendMail">发送</button>
+      </div>
+    </div>
+    <div class="toolbar">
+      <strong>邮件列表</strong>
+      <div class="form-row" style="margin:0">
+        <label>查询账号<input id="mailQueryAcc" placeholder="账号"></label>
+        <label>区服<input id="mailQueryArea" type="number" min="1" value="1" placeholder="1"></label>
+        <button class="btn btn-primary" id="btnRefreshMails">查询</button>
+      </div>
+    </div>
+    <table><thead><tr><th>ID</th><th>区服</th><th>描述</th><th>物品</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody id="mailsBody"></tbody></table>
+  </div>
+  <div class="panel" id="panel-update">
+    <div class="card" style="margin-bottom:16px">
+      <strong>版本配置</strong>
+      <p class="hint">客户端可通过 GET /update/check 检查更新；JSON 配置供 Java 层下载（onJsonDownload）；活动/修复数据经 getInitData 下发。APK 与资源 zip 放服务端后客户端可自动拉取。</p>
+      <div class="form-row">
+        <label>程序版本<input id="updProgramVer" type="number" min="1" value="520"></label>
+        <label>最低程序版本<input id="updMinProgramVer" type="number" min="1" value="520"></label>
+        <label>JSON 版本<input id="updJsonVer" type="number" min="0" value="1"></label>
+        <label>JSON 文件<input id="updJsonFile" value="1.json"></label>
+        <label>资源版本<input id="updAssetVer" type="number" min="0" value="0"></label>
+        <label>资源文件<input id="updAssetFile" placeholder="res.zip"></label>
+      </div>
+      <div class="form-row">
+        <label>APK 文件名<input id="updApkFile" placeholder="game.apk"></label>
+        <label style="flex:1">APK 外链（可选，留空则用本机 /update/apk/）<input id="updApkUrl" placeholder="http://..."></label>
+      </div>
+      <div class="form-row">
+        <label style="flex:1">更新公告<textarea id="updNotice" placeholder="可选"></textarea></label>
+      </div>
+      <div class="form-row">
+        <label>上传 APK<input type="file" id="updApkUpload" accept=".apk,application/vnd.android.package-archive"></label>
+        <button class="btn btn-primary" id="btnUploadApk">上传 APK</button>
+      </div>
+      <div class="form-row">
+        <label><input type="checkbox" id="updEnabled" checked> 启用更新</label>
+        <label><input type="checkbox" id="updForce"> 强制更新</label>
+        <button class="btn btn-primary" id="btnSaveUpdate">保存配置</button>
+        <button class="btn btn-primary" id="btnRefreshUpdate">刷新</button>
+      </div>
+      <p class="hint" id="updateAssetHint"></p>
+    </div>
+    <div class="card">
+      <strong>活动 JSON（huoDong）</strong>
+      <p class="hint">保存后同步到 manifest 与 getInitData；同时写入 data/updates/json/ 文件供客户端下载。</p>
+      <div class="form-row">
+        <label>JSON 文件<input id="updJsonEditFile" value="1.json"></label>
+        <button class="btn btn-primary" id="btnLoadUpdateJson">加载</button>
+        <button class="btn btn-primary" id="btnSaveUpdateJson">保存 JSON</button>
+      </div>
+      <textarea id="updJsonContent" style="width:100%;min-height:220px;font-family:Consolas,monospace;background:#111827;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:12px"></textarea>
+      <pre id="updateUrls" style="margin-top:12px;font-size:12px"></pre>
+    </div>
+  </div>
+  <div class="panel" id="panel-config"><div class="card" id="configBox"></div></div>
+</div>
+<div class="modal" id="modal"><div class="modal-box">
+  <div class="toolbar"><strong id="modalTitle">存档详情</strong><button class="btn btn-primary" id="btnCloseModal">关闭</button></div>
+  <pre id="modalContent"></pre>
+</div></div>
+<script>
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function showMsg(text) {
+  document.getElementById('msg').textContent = text || '';
+}
+
+async function api(path, opts) {
+  opts = opts || {};
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    let detail = '';
+    try {
+      detail = await res.text();
+    } catch (e) {}
+    throw new Error('请求失败: ' + res.status + (detail ? ' ' + detail.slice(0, 200) : ''));
+  }
+  return res;
+}
+
+async function loadStats() {
+  const res = await api('/admin/api/stats');
+  const data = await res.json();
+  const cards = [
+    ['账号数', data.account_count],
+    ['存档数', data.save_count],
+    ['版本 ver', data.game_version],
+    ['端口', data.port]
+  ];
+  document.getElementById('statsCards').innerHTML = cards.map(function(item) {
+    return '<div class="card"><div class="label">' + esc(item[0]) + '</div><div class="value">' + esc(item[1]) + '</div></div>';
+  }).join('');
+  document.getElementById('configBox').innerHTML = '<pre>' + esc(JSON.stringify(data, null, 2)) + '</pre>';
+}
+
+async function loadAccounts() {
+  const res = await api('/admin/api/accounts');
+  const data = await res.json();
+  const items = data.items || [];
+  const tbody = document.getElementById('accountsBody');
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="5">暂无账号</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map(function(a) {
+    const pwd = a.has_password ? '已设置' : '未设置(旧账号)';
+    return '<tr><td>' + esc(a.acc) + '</td><td>' + a.id + '</td><td><code>' + esc(a.mtt) + '</code></td><td>' + pwd + '</td>' +
+      '<td><button class="btn btn-primary" data-reset="' + esc(a.acc) + '">重置密码</button>' +
+      '<button class="btn btn-danger" data-acc="' + esc(a.acc) + '">删除</button></td></tr>';
+  }).join('');
+  tbody.querySelectorAll('button[data-acc]').forEach(function(btn) {
+    btn.onclick = function() { delAccount(btn.getAttribute('data-acc')); };
+  });
+  tbody.querySelectorAll('button[data-reset]').forEach(function(btn) {
+    btn.onclick = function() { resetPassword(btn.getAttribute('data-reset')); };
+  });
+}
+
+async function resetPassword(acc) {
+  const psw = prompt('为 ' + acc + ' 设置新密码（至少 6 位）', '123456');
+  if (!psw) return;
+  const res = await api('/admin/api/account/password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ acc: acc, psw: psw })
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    setMsg(data.error || '重置失败');
+    return;
+  }
+  setMsg('密码已更新: ' + acc);
+  loadAccounts();
+}
+
+async function loadSaves() {
+  const res = await api('/admin/api/saves');
+  const data = await res.json();
+  const items = data.items || [];
+  const tbody = document.getElementById('savesBody');
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="5">暂无存档</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map(function(s) {
+    return '<tr><td>' + esc(s.acc) + '</td><td>' + s.area + '</td><td>' + esc(s.size_text) + '</td><td>' +
+      esc(s.updated_at_text) + '</td><td>' +
+      '<button class="btn btn-primary" data-acc="' + esc(s.acc) + '" data-area="' + s.area + '">查看</button>' +
+      '<button class="btn btn-danger" data-acc="' + esc(s.acc) + '" data-area="' + s.area + '">删除</button>' +
+      '</td></tr>';
+  }).join('');
+  tbody.querySelectorAll('button.btn-primary[data-acc]').forEach(function(btn) {
+    btn.onclick = function() {
+      viewSave(btn.getAttribute('data-acc'), Number(btn.getAttribute('data-area')));
+    };
+  });
+  tbody.querySelectorAll('button.btn-danger[data-acc]').forEach(function(btn) {
+    btn.onclick = function() {
+      delSave(btn.getAttribute('data-acc'), Number(btn.getAttribute('data-area')));
+    };
+  });
+}
+
+async function viewSave(acc, area) {
+  const res = await api('/admin/api/save?acc=' + encodeURIComponent(acc) + '&area=' + area);
+  const data = await res.json();
+  document.getElementById('modalTitle').textContent = '存档 ' + acc + ' / 区服 ' + area;
+  document.getElementById('modalContent').textContent = data.preview || '';
+  document.getElementById('modal').classList.add('open');
+}
+
+async function delSave(acc, area) {
+  if (!confirm('删除存档 ' + acc + ' 区服 ' + area + '？')) return;
+  await api('/admin/api/save?acc=' + encodeURIComponent(acc) + '&area=' + area, { method: 'DELETE' });
+  showMsg('存档已删除');
+  loadSaves();
+  loadStats();
+}
+
+async function delAccount(acc) {
+  if (!confirm('删除账号 ' + acc + ' 及其全部存档？')) return;
+  await api('/admin/api/account?acc=' + encodeURIComponent(acc), { method: 'DELETE' });
+  showMsg('账号已删除');
+  loadAccounts();
+  loadSaves();
+  loadStats();
+}
+
+async function loadMails() {
+  const acc = document.getElementById('mailQueryAcc').value.trim();
+  const area = Number(document.getElementById('mailQueryArea').value) || 1;
+  if (!acc) {
+    showMsg('请输入要查询的账号');
+    return;
+  }
+  if (area <= 0) {
+    showMsg('请输入有效的区服');
+    return;
+  }
+  showMsg('');
+  const res = await api('/admin/api/mails?acc=' + encodeURIComponent(acc) + '&area=' + area);
+  const data = await res.json();
+  const items = data.items || [];
+  const tbody = document.getElementById('mailsBody');
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="7">暂无邮件（账号 ' + esc(acc) + ' / 区服 ' + area + '，待发 ' + (data.pending || 0) + '）</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map(function(m) {
+    var badgeClass = 'badge-delivered';
+    var badgeText = m.status;
+    if (m.status === 'pending') { badgeClass = 'badge-pending'; badgeText = '待发'; }
+    else if (m.status === 'in_save') { badgeText = '已写入存档'; }
+    else if (m.status === 'claimed') { badgeText = '已领取'; }
+    const badge = '<span class="badge ' + badgeClass + '">' + esc(badgeText) + '</span>';
+    return '<tr><td><code>' + esc(m.id) + '</code></td><td>' + (m.area || area) + '</td><td>' + esc(m.desp) + '</td><td><code>' +
+      esc(JSON.stringify(m.items || {})) + '</code></td><td>' + badge + '</td><td>' +
+      esc(m.created_at_text || '-') + '</td><td>' +
+      (m.status === 'pending'
+        ? '<button class="btn btn-danger" data-acc="' + esc(acc) + '" data-area="' + area + '" data-id="' + esc(m.id) + '">删除</button>'
+        : '-') +
+      '</td></tr>';
+  }).join('');
+  tbody.querySelectorAll('button[data-id]').forEach(function(btn) {
+    btn.onclick = function() {
+      delMail(btn.getAttribute('data-acc'), Number(btn.getAttribute('data-area')), btn.getAttribute('data-id'));
+    };
+  });
+}
+
+async function sendMail() {
+  const acc = document.getElementById('mailAcc').value.trim();
+  const area = Number(document.getElementById('mailArea').value) || 0;
+  const desp = document.getElementById('mailDesp').value.trim() || '系统奖励';
+  const itemsText = document.getElementById('mailItems').value.trim();
+  if (!acc) {
+    showMsg('请输入账号');
+    return;
+  }
+  if (area <= 0) {
+    showMsg('请输入有效的区服');
+    return;
+  }
+  let items;
+  try {
+    items = JSON.parse(itemsText);
+  } catch (e) {
+    showMsg('物品 JSON 格式错误');
+    return;
+  }
+  if (!items || typeof items !== 'object' || Array.isArray(items)) {
+    showMsg('items 必须是 JSON 对象，如 {"9716":10}');
+    return;
+  }
+  showMsg('');
+  const res = await api('/admin/api/mail', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ acc: acc, area: area, desp: desp, items: items })
+  });
+  const data = await res.json();
+  showMsg('邮件已创建: ' + data.id + '（区服 ' + area + '）');
+  document.getElementById('mailQueryAcc').value = acc;
+  document.getElementById('mailQueryArea').value = area;
+  loadMails();
+}
+
+async function delMail(acc, area, id) {
+  if (!confirm('删除待发邮件 ' + id + '（区服 ' + area + '）？')) return;
+  await api('/admin/api/mail?acc=' + encodeURIComponent(acc) + '&area=' + area + '&id=' + encodeURIComponent(id), { method: 'DELETE' });
+  showMsg('邮件已删除');
+  loadMails();
+}
+
+async function loadUpdate() {
+  const res = await api('/admin/api/update');
+  const data = await res.json();
+  document.getElementById('updEnabled').checked = !!data.enabled;
+  document.getElementById('updForce').checked = !!data.force_update;
+  document.getElementById('updProgramVer').value = data.program_version || 520;
+  document.getElementById('updMinProgramVer').value = data.min_program_version || 520;
+  document.getElementById('updJsonVer').value = data.json_version || 1;
+  document.getElementById('updJsonFile').value = data.json_file || '1.json';
+  document.getElementById('updAssetVer').value = data.asset_version || 0;
+  document.getElementById('updAssetFile').value = data.asset_file || '';
+  document.getElementById('updApkFile').value = data.apk_file || '';
+  document.getElementById('updNotice').value = data.update_notice || '';
+  document.getElementById('updApkUrl').value = data.apk_url || '';
+  document.getElementById('updJsonEditFile').value = data.json_file || '1.json';
+  const urls = [
+    '检查更新: ' + (data.check_url || '-'),
+    'Manifest: ' + (data.public_base_url || '') + '/update/manifest',
+    'JSON: ' + (data.json_url || '-'),
+    '资源: ' + (data.asset_url || '-'),
+    'APK: ' + (data.apk_download_url || '-'),
+    'JSON 文件列表: ' + JSON.stringify(data.json_files || []),
+    '资源文件列表: ' + JSON.stringify(data.asset_files || []),
+    'APK 文件列表: ' + JSON.stringify(data.apk_files || [])
+  ];
+  document.getElementById('updateUrls').textContent = urls.join('\n');
+  document.getElementById('updateAssetHint').textContent =
+    '资源 zip 放到 data/updates/assets/；APK 可上传或手动放到 data/updates/apk/。客户端 prog_ver 低于程序版本时会返回 apk_update=true。';
+  if (Array.isArray(data.huo_dong)) {
+    document.getElementById('updJsonContent').value = JSON.stringify({ huoDong: data.huo_dong, version: data.json_version || 1 }, null, 2);
+  }
+}
+
+async function saveUpdate() {
+  const body = {
+    enabled: document.getElementById('updEnabled').checked,
+    force_update: document.getElementById('updForce').checked,
+    program_version: Number(document.getElementById('updProgramVer').value) || 520,
+    min_program_version: Number(document.getElementById('updMinProgramVer').value) || 520,
+    json_version: Number(document.getElementById('updJsonVer').value) || 1,
+    json_file: document.getElementById('updJsonFile').value.trim() || '1.json',
+    asset_version: Number(document.getElementById('updAssetVer').value) || 0,
+    asset_file: document.getElementById('updAssetFile').value.trim(),
+    apk_file: document.getElementById('updApkFile').value.trim(),
+    update_notice: document.getElementById('updNotice').value.trim(),
+    apk_url: document.getElementById('updApkUrl').value.trim()
+  };
+  try {
+    const parsed = JSON.parse(document.getElementById('updJsonContent').value || '{}');
+    if (Array.isArray(parsed.huoDong)) {
+      body.huo_dong = parsed.huoDong;
+    }
+  } catch (e) {}
+  await api('/admin/api/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  showMsg('更新配置已保存');
+  loadUpdate();
+}
+
+async function loadUpdateJsonFile() {
+  const file = document.getElementById('updJsonEditFile').value.trim() || '1.json';
+  const res = await api('/admin/api/update/json?file=' + encodeURIComponent(file));
+  const data = await res.json();
+  document.getElementById('updJsonContent').value = data.content || '';
+  showMsg('已加载 ' + file);
+}
+
+async function saveUpdateJsonFile() {
+  const file = document.getElementById('updJsonEditFile').value.trim() || '1.json';
+  const content = document.getElementById('updJsonContent').value;
+  await api('/admin/api/update/json', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      file: file,
+      content: content,
+      json_version: Number(document.getElementById('updJsonVer').value) || 1
+    })
+  });
+  showMsg('JSON 已保存: ' + file);
+  loadUpdate();
+}
+
+async function uploadApk() {
+  const input = document.getElementById('updApkUpload');
+  if (!input.files || !input.files.length) {
+    showMsg('请选择 APK 文件');
+    return;
+  }
+  try {
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    form.append('program_version', document.getElementById('updProgramVer').value || '521');
+    showMsg('');
+    const res = await fetch('/admin/api/update/apk', { method: 'POST', body: form });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error('上传失败: ' + res.status + ' ' + detail.slice(0, 120));
+    }
+    const data = await res.json();
+    showMsg('APK 已上传: ' + data.apk_file + '，程序版本=' + data.program_version);
+    loadUpdate();
+  } catch (e) {
+    showMsg(e.message || String(e));
+  }
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+}
+
+document.querySelectorAll('.tab').forEach(function(btn) {
+  btn.onclick = function() {
+    document.querySelectorAll('.tab').forEach(function(x) { x.classList.remove('active'); });
+    document.querySelectorAll('.panel').forEach(function(x) { x.classList.remove('active'); });
+    btn.classList.add('active');
+    document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+  };
+});
+
+document.getElementById('btnRefreshAccounts').onclick = loadAccounts;
+document.getElementById('btnRefreshSaves').onclick = loadSaves;
+document.getElementById('btnRefreshMails').onclick = loadMails;
+document.getElementById('btnSendMail').onclick = sendMail;
+document.getElementById('btnSaveUpdate').onclick = saveUpdate;
+document.getElementById('btnRefreshUpdate').onclick = loadUpdate;
+document.getElementById('btnLoadUpdateJson').onclick = loadUpdateJsonFile;
+document.getElementById('btnSaveUpdateJson').onclick = saveUpdateJsonFile;
+document.getElementById('btnUploadApk').onclick = uploadApk;
+document.getElementById('btnCloseModal').onclick = closeModal;
+
+loadStats();
+loadAccounts();
+loadSaves();
+loadUpdate();
+</script>
+</body>
+</html>

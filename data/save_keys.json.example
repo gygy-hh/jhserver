@@ -1,0 +1,6 @@
+{
+  "by_index": {
+    "1": "paste_16_char_key"
+  },
+  "_comment": "Use Frida script scripts/frida_save_crypto.js to capture KEY, then paste per save_index here."
+}
