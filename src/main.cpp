@@ -42,6 +42,10 @@ int main(int argc, char** argv) {
   jh::auth_init(auth_cfg);
 
   httplib::Server server;
+  server.set_read_timeout(180, 0);
+  server.set_write_timeout(180, 0);
+  server.set_keep_alive_timeout(180);
+  server.set_payload_max_length(64 * 1024 * 1024);
   jh::admin::register_routes(server, config);
   jh::update::register_routes(server, config);
   jh::handlers::register_routes(server, config);

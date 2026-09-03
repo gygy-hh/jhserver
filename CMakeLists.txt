@@ -24,6 +24,9 @@ add_executable(jh_server
 )
 
 target_include_directories(jh_server PRIVATE include third_party)
+target_compile_definitions(jh_server PRIVATE
+  CPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH=67108864
+)
 
 set(JH_MYSQL_HINTS
   "${CMAKE_SOURCE_DIR}/third_party/mysql"

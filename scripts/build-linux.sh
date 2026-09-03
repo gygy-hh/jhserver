@@ -7,6 +7,7 @@ mkdir -p "$OUT"
 
 g++ -std=c++17 -O1 -g0 \
   -static -static-libgcc -static-libstdc++ -pthread \
+  -DCPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH=67108864 \
   -I"$ROOT/include" -I"$ROOT/third_party" -I/usr/include/mariadb \
   "$ROOT"/src/main.cpp \
   "$ROOT"/src/config.cpp \

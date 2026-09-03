@@ -226,6 +226,7 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
                        {"area", m.area},
                        {"items", props},
                        {"status", m.status},
+                       {"push_version", m.push_version},
                        {"created_at", m.created_at},
                        {"created_at_text", format_time(m.created_at)}});
     }
@@ -289,6 +290,67 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
     if (!mail::remove(acc, area, id)) {
       res.status = 404;
       res.set_content(R"({"error":"not found"})", "application/json; charset=utf-8");
+      return;
+    }
+    res.set_content(R"({"ok":true})", "application/json; charset=utf-8");
+  });
+
+  server.Get("/admin/api/broadcasts", [](const httplib::Request&, httplib::Response& res) {
+    json jobs = json::array();
+    for (const auto& job : mail::list_broadcasts()) {
+      json items = json::object();
+      for (const auto& [prop_id, count] : job.items) {
+        items[prop_id] = count;
+      }
+      jobs.push_back({
+          {"id", job.id},
+          {"desp", job.desp},
+          {"items", items},
+          {"scheduled_at", job.scheduled_at},
+          {"scheduled_at_text", format_time(job.scheduled_at)},
+          {"created_at", job.created_at},
+          {"completed_at", job.completed_at},
+          {"recipient_count", job.recipient_count},
+          {"sent_count", job.sent_count},
+          {"status", job.status},
+      });
+    }
+    res.set_content(json{{"items", jobs}}.dump(), "application/json; charset=utf-8");
+  });
+
+  server.Post("/admin/api/broadcasts", [](const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+      body = req.body.empty() ? json::object() : json::parse(req.body);
+    } catch (...) {
+      res.status = 400;
+      res.set_content(R"({"error":"invalid json"})", "application/json; charset=utf-8");
+      return;
+    }
+    std::map<std::string, int> items;
+    if (body.contains("items") && body["items"].is_object()) {
+      for (auto it = body["items"].begin(); it != body["items"].end(); ++it) {
+        const int count = it.value().get<int>();
+        if (count > 0) {
+          items[it.key()] = count;
+        }
+      }
+    }
+    if (items.empty()) {
+      res.status = 400;
+      res.set_content(R"({"error":"items required"})", "application/json; charset=utf-8");
+      return;
+    }
+    const int64_t scheduled_at = body.value("scheduled_at", static_cast<int64_t>(std::time(nullptr)));
+    const std::string id = mail::create_broadcast(body.value("desp", "全服奖励"), items, scheduled_at);
+    res.set_content(json{{"ok", true}, {"id", id}, {"scheduled_at", scheduled_at}}.dump(),
+                    "application/json; charset=utf-8");
+  });
+
+  server.Delete("/admin/api/broadcasts", [](const httplib::Request& req, httplib::Response& res) {
+    if (!req.has_param("id") || !mail::cancel_broadcast(req.get_param_value("id"))) {
+      res.status = 404;
+      res.set_content(R"({"error":"scheduled job not found"})", "application/json; charset=utf-8");
       return;
     }
     res.set_content(R"({"ok":true})", "application/json; charset=utf-8");

@@ -2,6 +2,7 @@
 
 #include "jh/save_crypto.hpp"
 
+#include <functional>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
@@ -64,6 +65,31 @@ json build_mygift_entry(const mail::MailRecord& mail) {
   return entry;
 }
 
+// 解密 dat.json、交给 edit 修改、按原密钥重新加密。edit 返回 false 表示无改动。
+std::string edit_dat(const std::string& blob, int save_index, const std::function<bool(json&)>& edit) {
+  auto dat_cipher = get_segment(blob, "dat.json");
+  if (!dat_cipher) {
+    throw std::runtime_error("save blob missing dat.json");
+  }
+
+  save_crypto::DatKeyMode mode = save_crypto::DatKeyMode::kPaPaNew2;
+  std::string dat_plain;
+  if (*dat_cipher == "null" || dat_cipher->empty()) {
+    dat_plain = "{}";
+  } else {
+    dat_plain = save_crypto::decrypt_dat_auto(*dat_cipher, save_index, &mode);
+  }
+
+  json doc = json::parse(dat_plain);
+  if (!edit(doc)) {
+    return blob;
+  }
+
+  const std::string encrypted = save_crypto::encrypt_dat(doc.dump(-1, ' ', false, json::error_handler_t::replace),
+                                                         save_index, mode);
+  return set_segment(blob, "dat.json", encrypted);
+}
+
 }  // namespace
 
 std::vector<SaveSegment> parse(const std::string& blob) {
@@ -111,31 +137,19 @@ std::string inject_mygift(const std::string& blob, int save_index, const std::ve
   if (mails.empty()) {
     return blob;
   }
+  return edit_dat(blob, save_index, [&mails](json& doc) {
+    if (!doc.contains("myGift") || !doc["myGift"].is_object()) {
+      doc["myGift"] = json::object();
+    }
+    for (const auto& mail : mails) {
+      doc["myGift"][mail.id] = build_mygift_entry(mail);
+    }
+    return true;
+  });
+}
 
-  auto dat_cipher = get_segment(blob, "dat.json");
-  if (!dat_cipher) {
-    throw std::runtime_error("save blob missing dat.json");
-  }
-
-  save_crypto::DatKeyMode mode = save_crypto::DatKeyMode::kPaPaNew2;
-  std::string dat_plain;
-  if (*dat_cipher == "null" || dat_cipher->empty()) {
-    dat_plain = "{}";
-  } else {
-    dat_plain = save_crypto::decrypt_dat_auto(*dat_cipher, save_index, &mode);
-  }
-
-  json doc = json::parse(dat_plain);
-  if (!doc.contains("myGift") || !doc["myGift"].is_object()) {
-    doc["myGift"] = json::object();
-  }
-  for (const auto& mail : mails) {
-    doc["myGift"][mail.id] = build_mygift_entry(mail);
-  }
-
-  const std::string encrypted = save_crypto::encrypt_dat(doc.dump(-1, ' ', false, json::error_handler_t::replace),
-                                                         save_index, mode);
-  return set_segment(blob, "dat.json", encrypted);
+std::string strip_bl(const std::string& blob, int save_index) {
+  return edit_dat(blob, save_index, [](json& doc) { return doc.is_object() && doc.erase("bl") > 0; });
 }
 
 }  // namespace jh::save_blob

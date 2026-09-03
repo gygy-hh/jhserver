@@ -6,6 +6,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <nlohmann/json.hpp>
 
@@ -26,6 +27,16 @@ std::string save_path(const std::string& acc, int area) {
     }
   }
   return g_data_dir + "/saves/" + safe + "_" + std::to_string(area) + ".json";
+}
+
+std::string save_blob_path(const std::string& acc, int area) {
+  std::string p = save_path(acc, area);
+  if (p.size() > 5 && p.substr(p.size() - 5) == ".json") {
+    p.replace(p.size() - 5, 5, ".sav");
+  } else {
+    p += ".sav";
+  }
+  return p;
 }
 
 AccountAuthInfo to_auth_info(const DbAccount& db_acc) {
@@ -80,20 +91,35 @@ bool set_account_password(const std::string& acc, const std::string& salt, const
 bool save_cloud(const std::string& acc, int area, const std::string& save_json, const SaveMeta& meta) {
   std::lock_guard<std::mutex> lock(g_mu);
   db_ensure_account(acc);
+  const int64_t now = std::time(nullptr);
+  const int64_t save_time = meta.save_time > 0 ? meta.save_time : now;
+
+  {
+    std::ofstream blob(save_blob_path(acc, area), std::ios::binary | std::ios::trunc);
+    if (!blob) {
+      return false;
+    }
+    blob.write(save_json.data(), static_cast<std::streamsize>(save_json.size()));
+    blob.flush();
+    if (!blob) {
+      return false;
+    }
+  }
+
   std::ofstream out(save_path(acc, area));
   if (!out) {
     return false;
   }
-  const int64_t now = std::time(nullptr);
   nlohmann::json wrapper{
-      {"save", save_json},
       {"updated_at", now},
       {"username", meta.username},
       {"lev", meta.lev},
-      {"save_time", meta.save_time > 0 ? meta.save_time : now},
+      {"save_time", save_time},
+      {"save_bytes", save_json.size()},
   };
-  out << wrapper.dump();
-  return true;
+  out << wrapper.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+  out.flush();
+  return static_cast<bool>(out);
 }
 
 std::optional<SaveMeta> get_save_meta(const std::string& acc, int area) {
@@ -117,6 +143,15 @@ std::optional<SaveMeta> get_save_meta(const std::string& acc, int area) {
 
 std::optional<std::string> load_cloud(const std::string& acc, int area) {
   std::lock_guard<std::mutex> lock(g_mu);
+  {
+    std::ifstream blob(save_blob_path(acc, area), std::ios::binary);
+    if (blob) {
+      std::string data((std::istreambuf_iterator<char>(blob)), std::istreambuf_iterator<char>());
+      if (!data.empty()) {
+        return data;
+      }
+    }
+  }
   std::ifstream in(save_path(acc, area));
   if (!in) {
     return std::nullopt;
@@ -193,7 +228,9 @@ std::vector<SaveRecord> list_saves() {
 
 bool delete_save(const std::string& acc, int area) {
   std::lock_guard<std::mutex> lock(g_mu);
-  return fs::remove(save_path(acc, area));
+  const bool a = fs::remove(save_path(acc, area));
+  const bool b = fs::remove(save_blob_path(acc, area));
+  return a || b;
 }
 
 bool delete_account(const std::string& acc) {

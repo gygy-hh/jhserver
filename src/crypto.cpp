@@ -230,17 +230,19 @@ std::string base64_encode(const std::vector<uint8_t>& data) {
     i += 3;
   }
   if (i < data.size()) {
+    const bool two_left = (i + 1) < data.size();
     uint32_t n = static_cast<uint32_t>(data[i]) << 16;
-    if (i + 1 < data.size()) {
+    if (two_left) {
       n |= static_cast<uint32_t>(data[i + 1]) << 8;
     }
     out.push_back(kB64[(n >> 18) & 63]);
     out.push_back(kB64[(n >> 12) & 63]);
-    if (i + 1 < data.size()) {
+    if (two_left) {
       out.push_back(kB64[(n >> 6) & 63]);
       out.push_back('=');
     } else {
-      out.push_back(kB64[(n >> 6) & 63]);
+      // 只剩 1 字节时必须是 2 个字符 + "=="，多输出一个字符会让客户端解出多余字节
+      out.push_back('=');
       out.push_back('=');
     }
   }

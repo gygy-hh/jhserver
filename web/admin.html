@@ -68,7 +68,7 @@ pre{white-space:pre-wrap;word-break:break-all;background:#111827;padding:12px;bo
   <div class="panel" id="panel-mails">
     <div class="card" style="margin-bottom:16px">
       <strong>发送邮件（物品奖励）</strong>
-      <p class="hint">原版邮箱流程：待发邮件在 downloadSave 时写入 dat.json.myGift，客户端在邮箱点击领取（recvMail）。save_index 默认使用区服 area。</p>
+      <p class="hint">点击发送后，在线客户端会在下一次 getInitData 轮询时直接获得物品，无需下载云存档；切回前台可立即触发，正常最多约 2 分钟。</p>
       <div class="form-row">
         <label>账号<input id="mailAcc" placeholder="手机号 / 账号"></label>
         <label>区服<input id="mailArea" type="number" min="1" value="1" placeholder="1"></label>
@@ -86,6 +86,19 @@ pre{white-space:pre-wrap;word-break:break-all;background:#111827;padding:12px;bo
       </div>
     </div>
     <table><thead><tr><th>ID</th><th>区服</th><th>描述</th><th>物品</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody id="mailsBody"></tbody></table>
+    <div class="card" style="margin-top:16px;margin-bottom:16px">
+      <strong>全部存档群发</strong>
+      <p class="hint">按账号和区服去重发送到全部云存档。留空发送时间表示立即发送；定时任务会持久保存，服务器重启后仍有效。</p>
+      <div class="form-row">
+        <label>描述<input id="broadcastDesp" value="全服奖励"></label>
+        <label>物品 JSON<textarea id="broadcastItems" placeholder='{"9716":10}'>{&quot;9716&quot;:10}</textarea></label>
+        <label>发送时间（可选）<input id="broadcastTime" type="datetime-local"></label>
+        <button class="btn btn-primary" id="btnBroadcastNow">立即群发</button>
+        <button class="btn btn-primary" id="btnBroadcastSchedule">定时发送</button>
+      </div>
+    </div>
+    <div class="toolbar"><strong>群发任务</strong><button class="btn btn-primary" id="btnRefreshBroadcasts">刷新</button></div>
+    <table><thead><tr><th>任务 ID</th><th>描述</th><th>物品</th><th>计划时间</th><th>状态</th><th>发送数</th><th>操作</th></tr></thead><tbody id="broadcastsBody"></tbody></table>
   </div>
   <div class="panel" id="panel-update">
     <div class="card" style="margin-bottom:16px">
@@ -293,7 +306,8 @@ async function loadMails() {
   tbody.innerHTML = items.map(function(m) {
     var badgeClass = 'badge-delivered';
     var badgeText = m.status;
-    if (m.status === 'pending') { badgeClass = 'badge-pending'; badgeText = '待发'; }
+    if (m.status === 'pending') { badgeClass = 'badge-pending'; badgeText = '待推送'; }
+    else if (m.status === 'pushed') { badgeText = '已实时推送'; }
     else if (m.status === 'in_save') { badgeText = '已写入存档'; }
     else if (m.status === 'claimed') { badgeText = '已领取'; }
     const badge = '<span class="badge ' + badgeClass + '">' + esc(badgeText) + '</span>';
@@ -354,6 +368,78 @@ async function delMail(acc, area, id) {
   await api('/admin/api/mail?acc=' + encodeURIComponent(acc) + '&area=' + area + '&id=' + encodeURIComponent(id), { method: 'DELETE' });
   showMsg('邮件已删除');
   loadMails();
+}
+
+function parseBroadcastItems() {
+  let items;
+  try {
+    items = JSON.parse(document.getElementById('broadcastItems').value.trim());
+  } catch (e) {
+    throw new Error('群发物品 JSON 格式错误');
+  }
+  if (!items || typeof items !== 'object' || Array.isArray(items) || !Object.keys(items).length) {
+    throw new Error('群发物品必须是非空 JSON 对象');
+  }
+  return items;
+}
+
+async function createBroadcast(schedule) {
+  try {
+    const items = parseBroadcastItems();
+    const desp = document.getElementById('broadcastDesp').value.trim() || '全服奖励';
+    let scheduledAt = Math.floor(Date.now() / 1000);
+    if (schedule) {
+      const value = document.getElementById('broadcastTime').value;
+      if (!value) throw new Error('请选择发送时间');
+      scheduledAt = Math.floor(new Date(value).getTime() / 1000);
+      if (!Number.isFinite(scheduledAt) || scheduledAt <= Math.floor(Date.now() / 1000)) {
+        throw new Error('发送时间必须晚于当前时间');
+      }
+    } else if (!confirm('确认立即向所有云存档发送奖励？')) {
+      return;
+    }
+    const res = await api('/admin/api/broadcasts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ desp: desp, items: items, scheduled_at: scheduledAt })
+    });
+    const data = await res.json();
+    showMsg((schedule ? '定时任务已创建: ' : '群发任务已创建: ') + data.id);
+    loadBroadcasts();
+  } catch (e) {
+    showMsg(e.message || String(e));
+  }
+}
+
+async function loadBroadcasts() {
+  const res = await api('/admin/api/broadcasts');
+  const data = await res.json();
+  const tbody = document.getElementById('broadcastsBody');
+  const jobs = data.items || [];
+  if (!jobs.length) {
+    tbody.innerHTML = '<tr><td colspan="7">暂无群发任务</td></tr>';
+    return;
+  }
+  const names = { scheduled: '等待发送', running: '发送中', completed: '已完成', cancelled: '已取消' };
+  tbody.innerHTML = jobs.map(function(job) {
+    const pending = job.status === 'scheduled';
+    const statusClass = pending ? 'badge-pending' : 'badge-delivered';
+    return '<tr><td><code>' + esc(job.id) + '</code></td><td>' + esc(job.desp) + '</td><td><code>' +
+      esc(JSON.stringify(job.items || {})) + '</code></td><td>' + esc(job.scheduled_at_text || '-') +
+      '</td><td><span class="badge ' + statusClass + '">' + esc(names[job.status] || job.status) +
+      '</span></td><td>' + (job.sent_count || 0) + ' / ' + (job.recipient_count || 0) + '</td><td>' +
+      (pending ? '<button class="btn btn-danger" data-broadcast-id="' + esc(job.id) + '">取消</button>' : '-') +
+      '</td></tr>';
+  }).join('');
+  tbody.querySelectorAll('button[data-broadcast-id]').forEach(function(btn) {
+    btn.onclick = async function() {
+      const id = btn.getAttribute('data-broadcast-id');
+      if (!confirm('取消定时群发任务 ' + id + '？')) return;
+      await api('/admin/api/broadcasts?id=' + encodeURIComponent(id), { method: 'DELETE' });
+      showMsg('定时任务已取消');
+      loadBroadcasts();
+    };
+  });
 }
 
 async function loadUpdate() {
@@ -483,6 +569,9 @@ document.getElementById('btnRefreshAccounts').onclick = loadAccounts;
 document.getElementById('btnRefreshSaves').onclick = loadSaves;
 document.getElementById('btnRefreshMails').onclick = loadMails;
 document.getElementById('btnSendMail').onclick = sendMail;
+document.getElementById('btnBroadcastNow').onclick = function() { createBroadcast(false); };
+document.getElementById('btnBroadcastSchedule').onclick = function() { createBroadcast(true); };
+document.getElementById('btnRefreshBroadcasts').onclick = loadBroadcasts;
 document.getElementById('btnSaveUpdate').onclick = saveUpdate;
 document.getElementById('btnRefreshUpdate').onclick = loadUpdate;
 document.getElementById('btnLoadUpdateJson').onclick = loadUpdateJsonFile;
@@ -493,6 +582,7 @@ document.getElementById('btnCloseModal').onclick = closeModal;
 loadStats();
 loadAccounts();
 loadSaves();
+loadBroadcasts();
 loadUpdate();
 </script>
 </body>
