@@ -262,6 +262,9 @@ ServerConfig load_config(int argc, char** argv) {
         cfg.public_url = j["public_url"].get<std::string>();
 
       }
+      if (j.contains("remote_doc_secret")) {
+        cfg.remote_doc_secret = j["remote_doc_secret"].get<std::string>();
+      }
 
       if (j.contains("admin_acc")) {
         cfg.admin_acc = j["admin_acc"].get<std::string>();

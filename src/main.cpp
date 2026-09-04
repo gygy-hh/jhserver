@@ -46,7 +46,19 @@ int main(int argc, char** argv) {
   server.set_write_timeout(1800, 0);
   server.set_keep_alive_timeout(180);
   server.set_payload_max_length(2ULL * 1024 * 1024 * 1024);
-  server.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
+  server.set_pre_routing_handler([&config](const httplib::Request& req, httplib::Response& res) {
+    if (req.path.rfind("/admin", 0) == 0) {
+      const auto expected =
+          httplib::make_basic_authentication_header(config.admin_acc, config.admin_psw).second;
+      if (!req.has_header("Authorization") ||
+          req.get_header_value("Authorization") != expected) {
+        res.status = 401;
+        res.set_header("WWW-Authenticate", R"(Basic realm="jh-admin", charset="UTF-8")");
+        res.set_content(R"({"error":"admin authentication required"})",
+                        "application/json; charset=utf-8");
+        return httplib::Server::HandlerResponse::Handled;
+      }
+    }
     const bool is_stream_upload =
         req.path == "/admin/api/update/apk" || req.path == "/admin/api/update/integrity-apk";
     if (!is_stream_upload && req.has_header("Content-Length")) {

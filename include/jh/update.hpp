@@ -29,6 +29,9 @@ struct Manifest {
   std::string integrity_apk_file;
   std::string apk_md5;
   uint64_t apk_size = 0;
+  int doc_version = 0;
+  std::string doc_md5;
+  uint64_t doc_size = 0;
   nlohmann::json huo_dong = nlohmann::json::array();
   nlohmann::json repair = nlohmann::json::array();
   int64_t updated_at = 0;

@@ -145,6 +145,20 @@ pre{white-space:pre-wrap;word-break:break-all;background:#111827;padding:12px;bo
         <label>APK 大小<input id="updApkSize" readonly placeholder="-"></label>
       </div>
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <strong>服务端 doc.json</strong>
+      <p class="hint">上传原始或已 XOR 的 conf/doc.json。服务端会校验并统一加密保存；注入 SO 通过带时效签名的接口读取，安装包内无需再放置该文件。</p>
+      <div class="form-row">
+        <label>配置文件<input type="file" id="remoteDocUpload" accept=".json,application/json"></label>
+        <button class="btn btn-primary" id="btnUploadRemoteDoc" type="button" onclick="uploadRemoteDoc()">上传 doc.json</button>
+      </div>
+      <p class="hint" id="remoteDocStatus">尚未配置</p>
+      <div class="form-row">
+        <label>配置版本<input id="remoteDocVersion" readonly value="0"></label>
+        <label style="flex:1">文件 MD5<input id="remoteDocMd5" readonly placeholder="尚未上传"></label>
+        <label>文件大小<input id="remoteDocSize" readonly placeholder="-"></label>
+      </div>
+    </div>
     <div class="card">
       <strong>活动 JSON（huoDong）</strong>
       <p class="hint">保存后同步到 manifest 与 getInitData；同时写入 data/updates/json/ 文件供客户端下载。</p>
@@ -471,6 +485,12 @@ async function loadUpdate() {
   document.getElementById('integrityApkFile').value = data.integrity_apk_file || '';
   document.getElementById('updApkMd5').value = data.apk_md5 || '';
   document.getElementById('updApkSize').value = data.apk_size ? data.apk_size + ' bytes' : '';
+  document.getElementById('remoteDocVersion').value = data.doc_version || 0;
+  document.getElementById('remoteDocMd5').value = data.doc_md5 || '';
+  document.getElementById('remoteDocSize').value = data.doc_size ? data.doc_size + ' bytes' : '';
+  document.getElementById('remoteDocStatus').textContent = data.doc_configured
+    ? '已配置；客户端仅通过签名接口读取'
+    : '尚未配置，移除安装包内 doc.json 前请先上传';
   document.getElementById('updNotice').value = data.update_notice || '';
   document.getElementById('updApkUrl').value = data.apk_url || '';
   document.getElementById('updJsonEditFile').value = data.json_file || '1.json';
@@ -619,6 +639,38 @@ async function uploadIntegrityApk() {
     });
     status.textContent = '上传完成，MD5：' + data.apk_md5;
     showMsg('MD5 校验基准已更新: ' + data.apk_md5);
+    loadUpdate();
+  } catch (e) {
+    status.textContent = e.message || String(e);
+    showMsg(e.message || String(e));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function uploadRemoteDoc() {
+  const input = document.getElementById('remoteDocUpload');
+  const status = document.getElementById('remoteDocStatus');
+  const button = document.getElementById('btnUploadRemoteDoc');
+  if (!input.files || !input.files.length) {
+    showMsg('请选择 doc.json');
+    return;
+  }
+  const file = input.files[0];
+  button.disabled = true;
+  status.textContent = '正在上传并校验：' + file.size + ' bytes';
+  try {
+    const res = await fetch('/admin/api/update/doc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file
+    });
+    if (!res.ok) {
+      throw new Error('上传失败: ' + res.status + ' ' + (await res.text()).slice(0, 160));
+    }
+    const data = await res.json();
+    showMsg('doc.json 已更新，版本=' + data.doc_version);
+    status.textContent = '上传完成，MD5：' + data.doc_md5;
     loadUpdate();
   } catch (e) {
     status.textContent = e.message || String(e);

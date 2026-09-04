@@ -21,6 +21,7 @@ struct ServerConfig {
   std::string data_dir = "data";
   std::string root_dir = ".";
   std::string public_url;
+  std::string remote_doc_secret = "jh-doc-v1-8f3c1a6e5d9247b0";
   MysqlConfig mysql;
   std::string admin_acc = "19848015669";
   std::string admin_psw = "123456";

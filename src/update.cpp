@@ -8,6 +8,9 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <unordered_map>
+
+#include <zlib.h>
 
 namespace fs = std::filesystem;
 
@@ -20,6 +23,11 @@ using json = nlohmann::json;
 std::mutex g_mu;
 std::string g_data_dir;
 std::string g_default_base_url;
+std::mutex g_doc_nonce_mu;
+std::unordered_map<std::string, int64_t> g_doc_nonces;
+
+constexpr char kDocXorKey[] = "nnjttjmbjyzmmht91";
+constexpr size_t kMaxDocBytes = 32u * 1024u * 1024u;
 
 std::string updates_dir() {
   return g_data_dir + "/updates";
@@ -39,6 +47,14 @@ std::string apk_dir() {
 
 std::string integrity_dir() {
   return updates_dir() + "/integrity";
+}
+
+std::string conf_dir() {
+  return updates_dir() + "/conf";
+}
+
+std::string doc_path() {
+  return conf_dir() + "/doc.json";
 }
 
 std::string manifest_path() {
@@ -83,6 +99,194 @@ bool refresh_apk_integrity_unlocked(Manifest& m) {
   return true;
 }
 
+void doc_xor_transform(std::string& data) {
+  constexpr size_t key_len = sizeof(kDocXorKey) - 1;
+  for (size_t i = 0; i < data.size(); ++i) {
+    const unsigned char k = static_cast<unsigned char>(kDocXorKey[i % key_len]);
+    const unsigned char b = static_cast<unsigned char>(data[i]);
+    data[i] = static_cast<char>(k ^ ~(k ^ b));
+  }
+}
+
+bool normalize_doc_content(const std::string& input, std::string& encrypted) {
+  if (input.empty() || input.size() > kMaxDocBytes) {
+    return false;
+  }
+  size_t first = 0;
+  while (first < input.size() && std::isspace(static_cast<unsigned char>(input[first])) != 0) {
+    ++first;
+  }
+  std::string plain;
+  if (first < input.size() && (input[first] == '{' || input[first] == '[')) {
+    plain = input;
+    encrypted = input;
+    doc_xor_transform(encrypted);
+  } else {
+    encrypted = input;
+    plain = input;
+    doc_xor_transform(plain);
+  }
+  try {
+    const json parsed = json::parse(plain);
+    return parsed.is_object();
+  } catch (...) {
+    encrypted.clear();
+    return false;
+  }
+}
+
+bool write_doc_unlocked(const std::string& encrypted) {
+  fs::create_directories(conf_dir());
+  const std::string temp_path = doc_path() + ".tmp";
+  {
+    std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+    out.write(encrypted.data(), static_cast<std::streamsize>(encrypted.size()));
+    out.flush();
+    if (!out) {
+      return false;
+    }
+  }
+  std::error_code ec;
+  fs::rename(temp_path, doc_path(), ec);
+  if (!ec) {
+    return true;
+  }
+  fs::remove(doc_path(), ec);
+  ec.clear();
+  fs::rename(temp_path, doc_path(), ec);
+  if (ec) {
+    fs::remove(temp_path, ec);
+    return false;
+  }
+  return true;
+}
+
+bool refresh_doc_metadata_unlocked(Manifest& m) {
+  m.doc_md5.clear();
+  m.doc_size = 0;
+  const fs::path path(doc_path());
+  if (!fs::exists(path) || !fs::is_regular_file(path)) {
+    return false;
+  }
+  m.doc_md5 = crypto::md5_file(path.string());
+  if (m.doc_md5.size() != 32) {
+    m.doc_md5.clear();
+    return false;
+  }
+  m.doc_size = fs::file_size(path);
+  return m.doc_size > 0 && m.doc_size <= kMaxDocBytes;
+}
+
+std::optional<std::string> load_doc_unlocked() {
+  std::ifstream in(doc_path(), std::ios::binary);
+  if (!in) {
+    return std::nullopt;
+  }
+  std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (content.empty() || content.size() > kMaxDocBytes) {
+    return std::nullopt;
+  }
+  return content;
+}
+
+bool is_hex_token(const std::string& value, size_t min_size, size_t max_size) {
+  if (value.size() < min_size || value.size() > max_size) {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](unsigned char c) {
+    return std::isxdigit(c) != 0;
+  });
+}
+
+bool constant_time_equal(const std::string& a, const std::string& b) {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  unsigned char diff = 0;
+  for (size_t i = 0; i < a.size(); ++i) {
+    diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+  }
+  return diff == 0;
+}
+
+bool authorize_doc_request(const httplib::Request& req, const ServerConfig& config,
+                           std::string& timestamp, std::string& nonce) {
+  if (config.remote_doc_secret.size() < 16 || !req.has_param("ts") ||
+      !req.has_param("nonce") || !req.has_param("sig")) {
+    return false;
+  }
+  timestamp = req.get_param_value("ts");
+  nonce = req.get_param_value("nonce");
+  const std::string signature = req.get_param_value("sig");
+  if (!is_hex_token(nonce, 16, 64) || !is_hex_token(signature, 32, 32)) {
+    return false;
+  }
+  int64_t ts = 0;
+  try {
+    ts = std::stoll(timestamp);
+  } catch (...) {
+    return false;
+  }
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  if (ts < now - 300 || ts > now + 300) {
+    return false;
+  }
+  const std::string expected =
+      crypto::md5_hex(config.remote_doc_secret + "|" + timestamp + "|" + nonce + "|doc");
+  if (!constant_time_equal(expected, signature)) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(g_doc_nonce_mu);
+  for (auto it = g_doc_nonces.begin(); it != g_doc_nonces.end();) {
+    if (it->second < now - 300) {
+      it = g_doc_nonces.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (g_doc_nonces.find(nonce) != g_doc_nonces.end()) {
+    return false;
+  }
+  g_doc_nonces[nonce] = now;
+  return true;
+}
+
+uint8_t hex_byte(const std::string& hex, size_t pos) {
+  auto nibble = [](char c) -> uint8_t {
+    if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+    if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
+    return static_cast<uint8_t>(c - 'A' + 10);
+  };
+  return static_cast<uint8_t>((nibble(hex[pos]) << 4) | nibble(hex[pos + 1]));
+}
+
+void crypt_doc_transport(std::string& content, const std::string& secret,
+                         const std::string& timestamp, const std::string& nonce) {
+  const std::string digest = crypto::md5_hex(secret + "|" + timestamp + "|" + nonce + "|stream");
+  std::array<uint8_t, 16> key{};
+  for (size_t i = 0; i < key.size(); ++i) {
+    key[i] = hex_byte(digest, i * 2);
+  }
+  for (size_t i = 0; i < content.size(); ++i) {
+    content[i] =
+        static_cast<char>(static_cast<unsigned char>(content[i]) ^ key[i % key.size()]);
+  }
+}
+
+bool compress_doc_transport(const std::string& input, std::string& output) {
+  uLongf compressed_size = compressBound(static_cast<uLong>(input.size()));
+  output.resize(static_cast<size_t>(compressed_size));
+  const int rc = compress2(reinterpret_cast<Bytef*>(output.data()), &compressed_size,
+                           reinterpret_cast<const Bytef*>(input.data()),
+                           static_cast<uLong>(input.size()), Z_BEST_COMPRESSION);
+  if (rc != Z_OK) {
+    output.clear();
+    return false;
+  }
+  output.resize(static_cast<size_t>(compressed_size));
+  return true;
+}
+
 std::string resolve_apk_url(const Manifest& m, const std::string& base_url) {
   if (!m.apk_url.empty()) {
     return m.apk_url;
@@ -110,6 +314,9 @@ Manifest manifest_from_json(const json& j) {
   m.integrity_apk_file = j.value("integrity_apk_file", "");
   m.apk_md5 = j.value("apk_md5", "");
   m.apk_size = j.value("apk_size", static_cast<uint64_t>(0));
+  m.doc_version = j.value("doc_version", 0);
+  m.doc_md5 = j.value("doc_md5", "");
+  m.doc_size = j.value("doc_size", static_cast<uint64_t>(0));
   m.updated_at = j.value("updated_at", static_cast<int64_t>(0));
   if (j.contains("huo_dong") && j["huo_dong"].is_array()) {
     m.huo_dong = j["huo_dong"];
@@ -139,6 +346,9 @@ json manifest_to_json(const Manifest& m) {
       {"integrity_apk_file", m.integrity_apk_file},
       {"apk_md5", m.apk_md5},
       {"apk_size", m.apk_size},
+      {"doc_version", m.doc_version},
+      {"doc_md5", m.doc_md5},
+      {"doc_size", m.doc_size},
       {"huo_dong", m.huo_dong},
       {"repair", m.repair},
       {"updated_at", m.updated_at},
@@ -189,6 +399,7 @@ json build_update_payload(const Manifest& m, int client_json_ver, int client_ass
       {"apk_file", m.apk_file},
       {"apk_md5", m.apk_md5},
       {"apk_size", m.apk_size},
+      {"doc_version", m.doc_version},
   };
 
   if (!m.json_file.empty()) {
@@ -255,6 +466,7 @@ void ensure_defaults_unlocked() {
   fs::create_directories(assets_dir());
   fs::create_directories(apk_dir());
   fs::create_directories(integrity_dir());
+  fs::create_directories(conf_dir());
   if (!fs::exists(manifest_path())) {
     Manifest m;
     m.updated_at = static_cast<int64_t>(std::time(nullptr));
@@ -275,6 +487,9 @@ void ensure_defaults_unlocked() {
       }
     } else if (!m.integrity_apk_file.empty() && m.apk_md5.empty()) {
       migrated = refresh_apk_integrity_unlocked(m);
+    }
+    if (fs::exists(doc_path()) && (m.doc_md5.empty() || m.doc_size == 0)) {
+      migrated = refresh_doc_metadata_unlocked(m) || migrated;
     }
     if (migrated) {
       m.updated_at = static_cast<int64_t>(std::time(nullptr));
@@ -555,6 +770,47 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
     res.set_content(*content, "application/json; charset=utf-8");
   });
 
+  server.Get("/update/conf/doc", [&config](const httplib::Request& req, httplib::Response& res) {
+    std::string timestamp;
+    std::string nonce;
+    if (!authorize_doc_request(req, config, timestamp, nonce)) {
+      res.status = 403;
+      res.set_content(R"({"error":"forbidden"})", "application/json; charset=utf-8");
+      return;
+    }
+
+    std::optional<std::string> content;
+    {
+      std::lock_guard<std::mutex> lock(g_mu);
+      content = load_doc_unlocked();
+    }
+    if (!content) {
+      res.status = 404;
+      res.set_content(R"({"error":"doc not configured"})", "application/json; charset=utf-8");
+      return;
+    }
+
+    const Manifest m = get_manifest();
+    const std::string doc_md5 = crypto::md5_hex(*content);
+    const std::string size = std::to_string(content->size());
+    const std::string response_signature = crypto::md5_hex(
+        config.remote_doc_secret + "|" + timestamp + "|" + nonce + "|" + doc_md5 + "|" + size);
+    std::string compressed;
+    if (!compress_doc_transport(*content, compressed)) {
+      res.status = 500;
+      res.set_content(R"({"error":"compression failed"})", "application/json; charset=utf-8");
+      return;
+    }
+    crypt_doc_transport(compressed, config.remote_doc_secret, timestamp, nonce);
+    res.set_header("Cache-Control", "no-store");
+    res.set_header("X-Doc-MD5", doc_md5);
+    res.set_header("X-Doc-Version", std::to_string(m.doc_version));
+    res.set_header("X-Doc-Size", size);
+    res.set_header("X-Doc-Encoding", "deflate");
+    res.set_header("X-Doc-Signature", response_signature);
+    res.set_content(std::move(compressed), "application/octet-stream");
+  });
+
   server.Get(R"(/update/assets/([^/]+))", [](const httplib::Request& req, httplib::Response& res) {
     const std::string name = req.matches[1];
     if (!is_safe_filename(name)) {
@@ -609,6 +865,7 @@ void register_admin_routes(httplib::Server& server, const ServerConfig& config) 
     out["json_url"] = m.json_file.empty() ? "" : base + "/update/json/" + m.json_file;
     out["asset_url"] = m.asset_file.empty() ? "" : base + "/update/assets/" + m.asset_file;
     out["apk_download_url"] = resolve_apk_url(m, base);
+    out["doc_configured"] = !m.doc_md5.empty() && m.doc_size > 0;
     out["check_url"] = base + "/update/check?json_ver=0&asset_ver=0&prog_ver=520";
     res.set_content(out.dump(2), "application/json; charset=utf-8");
   });
@@ -727,6 +984,39 @@ void register_admin_routes(httplib::Server& server, const ServerConfig& config) 
              {"integrity_apk_file", m.integrity_apk_file},
              {"apk_md5", m.apk_md5},
              {"apk_size", m.apk_size}}
+            .dump(),
+        "application/json; charset=utf-8");
+  });
+
+  server.Post("/admin/api/update/doc", [](const httplib::Request& req, httplib::Response& res) {
+    std::string encrypted;
+    if (!normalize_doc_content(req.body, encrypted)) {
+      res.status = 400;
+      res.set_content(R"({"error":"invalid doc.json or file exceeds 32MB"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+
+    Manifest m = get_manifest();
+    {
+      std::lock_guard<std::mutex> lock(g_mu);
+      if (!write_doc_unlocked(encrypted) || !refresh_doc_metadata_unlocked(m)) {
+        res.status = 500;
+        res.set_content(R"({"error":"save failed"})", "application/json; charset=utf-8");
+        return;
+      }
+    }
+    m.doc_version += 1;
+    if (!save_manifest(m)) {
+      res.status = 500;
+      res.set_content(R"({"error":"manifest save failed"})", "application/json; charset=utf-8");
+      return;
+    }
+    res.set_content(
+        json{{"ok", true},
+             {"doc_version", m.doc_version},
+             {"doc_md5", m.doc_md5},
+             {"doc_size", m.doc_size}}
             .dump(),
         "application/json; charset=utf-8");
   });
