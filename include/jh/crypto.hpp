@@ -9,6 +9,7 @@ namespace jh::crypto {
 constexpr const char* kMttSalt = "17031703";
 
 std::string md5_hex(const std::string& input);
+std::string md5_file(const std::string& path);
 std::string calc_mtt(uint32_t data_account);
 
 std::string get_zhiling_psw(int app_version);

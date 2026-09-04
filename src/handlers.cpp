@@ -465,7 +465,7 @@ json handle_upload_save_fields(const std::string& acc, int area, const std::stri
   } catch (const std::exception& ex) {
     std::cerr << "[uploadSave] mail sync ignored: " << ex.what() << std::endl;
   }
-  return api_ok();
+  return api_ok(json{{"msg", "上传成功"}});
 }
 
 json handle_upload_save_plain(const std::string& plain) {

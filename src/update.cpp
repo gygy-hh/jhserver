@@ -1,5 +1,7 @@
 #include "jh/update.hpp"
 
+#include "jh/crypto.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <ctime>
@@ -35,6 +37,10 @@ std::string apk_dir() {
   return updates_dir() + "/apk";
 }
 
+std::string integrity_dir() {
+  return updates_dir() + "/integrity";
+}
+
 std::string manifest_path() {
   return updates_dir() + "/manifest.json";
 }
@@ -56,6 +62,25 @@ bool is_safe_filename(const std::string& name) {
     }
   }
   return name.find("..") == std::string::npos;
+}
+
+bool refresh_apk_integrity_unlocked(Manifest& m) {
+  m.apk_md5.clear();
+  m.apk_size = 0;
+  if (!is_safe_filename(m.integrity_apk_file)) {
+    return false;
+  }
+  const fs::path path = fs::path(integrity_dir()) / m.integrity_apk_file;
+  if (!fs::exists(path) || !fs::is_regular_file(path)) {
+    return false;
+  }
+  const std::string md5 = crypto::md5_file(path.string());
+  if (md5.size() != 32) {
+    return false;
+  }
+  m.apk_md5 = md5;
+  m.apk_size = fs::file_size(path);
+  return true;
 }
 
 std::string resolve_apk_url(const Manifest& m, const std::string& base_url) {
@@ -82,6 +107,9 @@ Manifest manifest_from_json(const json& j) {
   m.update_notice = j.value("update_notice", "");
   m.apk_url = j.value("apk_url", "");
   m.apk_file = j.value("apk_file", "");
+  m.integrity_apk_file = j.value("integrity_apk_file", "");
+  m.apk_md5 = j.value("apk_md5", "");
+  m.apk_size = j.value("apk_size", static_cast<uint64_t>(0));
   m.updated_at = j.value("updated_at", static_cast<int64_t>(0));
   if (j.contains("huo_dong") && j["huo_dong"].is_array()) {
     m.huo_dong = j["huo_dong"];
@@ -108,6 +136,9 @@ json manifest_to_json(const Manifest& m) {
       {"update_notice", m.update_notice},
       {"apk_url", m.apk_url},
       {"apk_file", m.apk_file},
+      {"integrity_apk_file", m.integrity_apk_file},
+      {"apk_md5", m.apk_md5},
+      {"apk_size", m.apk_size},
       {"huo_dong", m.huo_dong},
       {"repair", m.repair},
       {"updated_at", m.updated_at},
@@ -156,6 +187,8 @@ json build_update_payload(const Manifest& m, int client_json_ver, int client_ass
       {"update_notice", m.update_notice},
       {"apk_url", apk_url},
       {"apk_file", m.apk_file},
+      {"apk_md5", m.apk_md5},
+      {"apk_size", m.apk_size},
   };
 
   if (!m.json_file.empty()) {
@@ -193,8 +226,27 @@ void sync_json_download_file_unlocked(const Manifest& m) {
 
 void save_manifest_unlocked(const Manifest& m) {
   fs::create_directories(updates_dir());
-  std::ofstream out(manifest_path());
-  out << manifest_to_json(m).dump(2);
+  const std::string temp_path = manifest_path() + ".tmp";
+  {
+    std::ofstream out(temp_path, std::ios::trunc);
+    out << manifest_to_json(m).dump(2);
+    out.flush();
+    if (!out) {
+      return;
+    }
+  }
+  std::error_code ec;
+  fs::rename(temp_path, manifest_path(), ec);
+  if (ec) {
+    // Windows 不允许 rename 覆盖；线上 Linux 走上面的原子替换。
+    std::error_code fallback_ec;
+    fs::remove(manifest_path(), fallback_ec);
+    fs::rename(temp_path, manifest_path(), fallback_ec);
+    if (fallback_ec) {
+      fs::remove(temp_path, fallback_ec);
+      return;
+    }
+  }
   sync_json_download_file_unlocked(m);
 }
 
@@ -202,10 +254,32 @@ void ensure_defaults_unlocked() {
   fs::create_directories(json_dir());
   fs::create_directories(assets_dir());
   fs::create_directories(apk_dir());
+  fs::create_directories(integrity_dir());
   if (!fs::exists(manifest_path())) {
     Manifest m;
     m.updated_at = static_cast<int64_t>(std::time(nullptr));
     save_manifest_unlocked(m);
+  } else {
+    Manifest m = load_manifest_unlocked();
+    bool migrated = false;
+    if (m.integrity_apk_file.empty() && !m.apk_md5.empty() && is_safe_filename(m.apk_file)) {
+      const fs::path old_path = fs::path(apk_dir()) / m.apk_file;
+      const fs::path new_path = fs::path(integrity_dir()) / m.apk_file;
+      std::error_code ec;
+      if (fs::exists(old_path) && fs::is_regular_file(old_path)) {
+        fs::copy_file(old_path, new_path, fs::copy_options::overwrite_existing, ec);
+        if (!ec) {
+          m.integrity_apk_file = m.apk_file;
+          migrated = refresh_apk_integrity_unlocked(m);
+        }
+      }
+    } else if (!m.integrity_apk_file.empty() && m.apk_md5.empty()) {
+      migrated = refresh_apk_integrity_unlocked(m);
+    }
+    if (migrated) {
+      m.updated_at = static_cast<int64_t>(std::time(nullptr));
+      save_manifest_unlocked(m);
+    }
   }
   const std::string sample_json = json_dir() + "/1.json";
   if (!fs::exists(sample_json)) {
@@ -222,6 +296,85 @@ bool serve_binary_file(const fs::path& path, httplib::Response& res, const std::
   std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   res.set_content(data, mime);
   return true;
+}
+
+struct StreamUpload {
+  std::string filename;
+  fs::path path;
+  uint64_t size = 0;
+};
+
+std::optional<StreamUpload> receive_stream_upload(const httplib::Request& req, httplib::Response& res,
+                                                  const httplib::ContentReader& content_reader,
+                                                  const fs::path& dir, const std::string& default_name) {
+  if (req.is_multipart_form_data()) {
+    res.status = 415;
+    res.set_content(R"({"error":"please refresh admin page and retry"})",
+                    "application/json; charset=utf-8");
+    return std::nullopt;
+  }
+  std::string filename = req.has_param("filename") ? req.get_param_value("filename") : default_name;
+  const auto pos = filename.find_last_of("/\\");
+  if (pos != std::string::npos) {
+    filename = filename.substr(pos + 1);
+  }
+  if (!is_safe_filename(filename)) {
+    res.status = 400;
+    res.set_content(R"({"error":"bad filename"})", "application/json; charset=utf-8");
+    return std::nullopt;
+  }
+
+  fs::create_directories(dir);
+  const fs::path final_path = dir / filename;
+  const fs::path temp_path = final_path.string() + ".upload";
+  std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    res.status = 500;
+    res.set_content(R"({"error":"open failed"})", "application/json; charset=utf-8");
+    return std::nullopt;
+  }
+
+  constexpr uint64_t kMaxApkBytes = 2ULL * 1024 * 1024 * 1024;
+  uint64_t size = 0;
+  bool too_large = false;
+  const bool received = content_reader([&](const char* data, size_t length) {
+    if (length > kMaxApkBytes - size) {
+      too_large = true;
+      return false;
+    }
+    out.write(data, static_cast<std::streamsize>(length));
+    if (!out) {
+      return false;
+    }
+    size += length;
+    return true;
+  });
+  out.flush();
+  const bool write_ok = static_cast<bool>(out);
+  out.close();
+  if (!received || !write_ok || size == 0) {
+    std::error_code ec;
+    fs::remove(temp_path, ec);
+    res.status = too_large ? 413 : 400;
+    res.set_content(too_large ? R"({"error":"APK exceeds 2GB"})" : R"({"error":"upload failed"})",
+                    "application/json; charset=utf-8");
+    return std::nullopt;
+  }
+
+  std::error_code ec;
+  fs::rename(temp_path, final_path, ec);
+  if (ec) {
+    std::error_code fallback_ec;
+    fs::remove(final_path, fallback_ec);
+    fs::rename(temp_path, final_path, fallback_ec);
+    if (fallback_ec) {
+      fs::remove(temp_path, fallback_ec);
+      res.status = 500;
+      res.set_content(R"({"error":"save failed"})", "application/json; charset=utf-8");
+      return std::nullopt;
+    }
+  }
+  return StreamUpload{filename, final_path, size};
 }
 
 }  // namespace
@@ -522,45 +675,60 @@ void register_admin_routes(httplib::Server& server, const ServerConfig& config) 
     res.set_content(R"({"ok":true})", "application/json; charset=utf-8");
   });
 
-  server.Post("/admin/api/update/apk", [](const httplib::Request& req, httplib::Response& res) {
-    if (!req.has_file("file")) {
-      res.status = 400;
-      res.set_content(R"({"error":"file required"})", "application/json; charset=utf-8");
+  server.Post("/admin/api/update/apk",
+              [](const httplib::Request& req, httplib::Response& res,
+                 const httplib::ContentReader& content_reader) {
+    const auto upload =
+        receive_stream_upload(req, res, content_reader, fs::path(apk_dir()), "game.apk");
+    if (!upload) {
       return;
     }
-    const auto file = req.get_file_value("file");
-    std::string filename = file.filename;
-    if (filename.empty()) {
-      filename = "game.apk";
-    }
-    const auto pos = filename.find_last_of("/\\");
-    if (pos != std::string::npos) {
-      filename = filename.substr(pos + 1);
-    }
-    if (!is_safe_filename(filename)) {
-      res.status = 400;
-      res.set_content(R"({"error":"bad filename"})", "application/json; charset=utf-8");
-      return;
-    }
-    fs::create_directories(apk_dir());
-    std::ofstream out(apk_dir() + "/" + filename, std::ios::binary);
-    out.write(file.content.data(), static_cast<std::streamsize>(file.content.size()));
-    if (!out) {
-      res.status = 500;
-      res.set_content(R"({"error":"save failed"})", "application/json; charset=utf-8");
-      return;
-    }
-
     Manifest m = get_manifest();
-    m.apk_file = filename;
-    if (req.has_file("program_version")) {
-      m.program_version = std::stoi(req.get_file_value("program_version").content);
+    m.apk_file = upload->filename;
+    if (req.has_param("program_version")) {
+      try {
+        m.program_version = std::stoi(req.get_param_value("program_version"));
+      } catch (...) {
+        res.status = 400;
+        res.set_content(R"({"error":"bad program_version"})", "application/json; charset=utf-8");
+        return;
+      }
     } else {
       m.program_version += 1;
     }
     save_manifest(m);
-    res.set_content(json{{"ok", true}, {"apk_file", filename}, {"program_version", m.program_version}}.dump(),
-                    "application/json; charset=utf-8");
+    res.set_content(
+        json{{"ok", true},
+             {"apk_file", upload->filename},
+             {"apk_size", upload->size},
+             {"program_version", m.program_version}}
+            .dump(),
+        "application/json; charset=utf-8");
+  });
+
+  server.Post("/admin/api/update/integrity-apk",
+              [](const httplib::Request& req, httplib::Response& res,
+                 const httplib::ContentReader& content_reader) {
+    const auto upload =
+        receive_stream_upload(req, res, content_reader, fs::path(integrity_dir()), "integrity.apk");
+    if (!upload) {
+      return;
+    }
+    Manifest m = get_manifest();
+    m.integrity_apk_file = upload->filename;
+    if (!refresh_apk_integrity_unlocked(m)) {
+      res.status = 500;
+      res.set_content(R"({"error":"md5 failed"})", "application/json; charset=utf-8");
+      return;
+    }
+    save_manifest(m);
+    res.set_content(
+        json{{"ok", true},
+             {"integrity_apk_file", m.integrity_apk_file},
+             {"apk_md5", m.apk_md5},
+             {"apk_size", m.apk_size}}
+            .dump(),
+        "application/json; charset=utf-8");
   });
 
   server.Get("/admin/api/update/json", [](const httplib::Request& req, httplib::Response& res) {

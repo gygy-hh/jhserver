@@ -131,6 +131,20 @@ pre{white-space:pre-wrap;word-break:break-all;background:#111827;padding:12px;bo
       </div>
       <p class="hint" id="updateAssetHint"></p>
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <strong>APK MD5 校验</strong>
+      <p class="hint">此处仅设置客户端完整性校验基准，与上方在线更新 APK 完全分开。请上传最终签名并实际分发的 APK；网络、读取失败或未上传基准时客户端放行。</p>
+      <div class="form-row">
+        <label>校验资源包<input type="file" id="integrityApkUpload" accept=".apk,application/vnd.android.package-archive"></label>
+        <button class="btn btn-primary" id="btnUploadIntegrityApk" type="button" onclick="uploadIntegrityApk()">上传并生成 MD5</button>
+      </div>
+      <p class="hint" id="integrityUploadStatus">等待选择 APK</p>
+      <div class="form-row">
+        <label>基准文件<input id="integrityApkFile" readonly placeholder="尚未上传"></label>
+        <label style="flex:1">APK MD5<input id="updApkMd5" readonly placeholder="尚未生成"></label>
+        <label>APK 大小<input id="updApkSize" readonly placeholder="-"></label>
+      </div>
+    </div>
     <div class="card">
       <strong>活动 JSON（huoDong）</strong>
       <p class="hint">保存后同步到 manifest 与 getInitData；同时写入 data/updates/json/ 文件供客户端下载。</p>
@@ -454,6 +468,9 @@ async function loadUpdate() {
   document.getElementById('updAssetVer').value = data.asset_version || 0;
   document.getElementById('updAssetFile').value = data.asset_file || '';
   document.getElementById('updApkFile').value = data.apk_file || '';
+  document.getElementById('integrityApkFile').value = data.integrity_apk_file || '';
+  document.getElementById('updApkMd5').value = data.apk_md5 || '';
+  document.getElementById('updApkSize').value = data.apk_size ? data.apk_size + ' bytes' : '';
   document.getElementById('updNotice').value = data.update_notice || '';
   document.getElementById('updApkUrl').value = data.apk_url || '';
   document.getElementById('updJsonEditFile').value = data.json_file || '1.json';
@@ -463,13 +480,14 @@ async function loadUpdate() {
     'JSON: ' + (data.json_url || '-'),
     '资源: ' + (data.asset_url || '-'),
     'APK: ' + (data.apk_download_url || '-'),
+    'APK MD5: ' + (data.apk_md5 || '未配置（客户端放行）'),
     'JSON 文件列表: ' + JSON.stringify(data.json_files || []),
     '资源文件列表: ' + JSON.stringify(data.asset_files || []),
     'APK 文件列表: ' + JSON.stringify(data.apk_files || [])
   ];
   document.getElementById('updateUrls').textContent = urls.join('\n');
   document.getElementById('updateAssetHint').textContent =
-    '资源 zip 放到 data/updates/assets/；APK 可上传或手动放到 data/updates/apk/。客户端 prog_ver 低于程序版本时会返回 apk_update=true。';
+    '此卡片只管理在线更新。上传更新 APK 不会修改下方 MD5 校验基准。';
   if (Array.isArray(data.huo_dong)) {
     document.getElementById('updJsonContent').value = JSON.stringify({ huoDong: data.huo_dong, version: data.json_version || 1 }, null, 2);
   }
@@ -535,20 +553,78 @@ async function uploadApk() {
     return;
   }
   try {
-    const form = new FormData();
-    form.append('file', input.files[0]);
-    form.append('program_version', document.getElementById('updProgramVer').value || '521');
-    showMsg('');
-    const res = await fetch('/admin/api/update/apk', { method: 'POST', body: form });
+    const file = input.files[0];
+    const query = '?filename=game.apk' +
+      '&program_version=' + encodeURIComponent(document.getElementById('updProgramVer').value || '521');
+    showMsg('正在上传更新 APK（' + file.size + ' bytes），请勿关闭页面……');
+    const res = await fetch('/admin/api/update/apk' + query, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file
+    });
     if (!res.ok) {
       const detail = await res.text();
       throw new Error('上传失败: ' + res.status + ' ' + detail.slice(0, 120));
     }
     const data = await res.json();
-    showMsg('APK 已上传: ' + data.apk_file + '，程序版本=' + data.program_version);
+    showMsg('更新 APK 已上传: ' + data.apk_file + '，程序版本=' + data.program_version);
     loadUpdate();
   } catch (e) {
     showMsg(e.message || String(e));
+  }
+}
+
+async function uploadIntegrityApk() {
+  const input = document.getElementById('integrityApkUpload');
+  const status = document.getElementById('integrityUploadStatus');
+  const button = document.getElementById('btnUploadIntegrityApk');
+  if (!input.files || !input.files.length) {
+    showMsg('请选择用于 MD5 校验的 APK');
+    status.textContent = '请先选择 APK';
+    return;
+  }
+  const file = input.files[0];
+  const query = '?filename=integrity.apk';
+  button.disabled = true;
+  status.textContent = '准备上传：' + file.name + '（' + file.size + ' bytes）';
+  showMsg('正在上传校验 APK……');
+  try {
+    const data = await new Promise(function(resolve, reject) {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/admin/api/update/integrity-apk' + query);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.timeout = 30 * 60 * 1000;
+      xhr.upload.onprogress = function(event) {
+        if (event.lengthComputable) {
+          const percent = Math.floor(event.loaded * 100 / event.total);
+          status.textContent = '正在上传：' + percent + '%（' + event.loaded + ' / ' + event.total + ' bytes）';
+        } else {
+          status.textContent = '正在上传：' + event.loaded + ' bytes';
+        }
+      };
+      xhr.onload = function() {
+        if (xhr.status < 200 || xhr.status >= 300) {
+          reject(new Error('上传失败: ' + xhr.status + ' ' + xhr.responseText.slice(0, 160)));
+          return;
+        }
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch (e) {
+          reject(new Error('服务端返回无效数据'));
+        }
+      };
+      xhr.onerror = function() { reject(new Error('上传网络连接失败')); };
+      xhr.ontimeout = function() { reject(new Error('上传超时')); };
+      xhr.send(file);
+    });
+    status.textContent = '上传完成，MD5：' + data.apk_md5;
+    showMsg('MD5 校验基准已更新: ' + data.apk_md5);
+    loadUpdate();
+  } catch (e) {
+    status.textContent = e.message || String(e);
+    showMsg(e.message || String(e));
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -577,6 +653,7 @@ document.getElementById('btnRefreshUpdate').onclick = loadUpdate;
 document.getElementById('btnLoadUpdateJson').onclick = loadUpdateJsonFile;
 document.getElementById('btnSaveUpdateJson').onclick = saveUpdateJsonFile;
 document.getElementById('btnUploadApk').onclick = uploadApk;
+document.getElementById('btnUploadIntegrityApk').onclick = uploadIntegrityApk;
 document.getElementById('btnCloseModal').onclick = closeModal;
 
 loadStats();

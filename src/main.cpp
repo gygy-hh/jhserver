@@ -42,10 +42,27 @@ int main(int argc, char** argv) {
   jh::auth_init(auth_cfg);
 
   httplib::Server server;
-  server.set_read_timeout(180, 0);
-  server.set_write_timeout(180, 0);
+  server.set_read_timeout(1800, 0);
+  server.set_write_timeout(1800, 0);
   server.set_keep_alive_timeout(180);
-  server.set_payload_max_length(64 * 1024 * 1024);
+  server.set_payload_max_length(2ULL * 1024 * 1024 * 1024);
+  server.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
+    const bool is_stream_upload =
+        req.path == "/admin/api/update/apk" || req.path == "/admin/api/update/integrity-apk";
+    if (!is_stream_upload && req.has_header("Content-Length")) {
+      try {
+        if (std::stoull(req.get_header_value("Content-Length")) > 64ULL * 1024 * 1024) {
+          res.status = 413;
+          res.set_content(R"({"error":"payload too large"})", "application/json; charset=utf-8");
+          return httplib::Server::HandlerResponse::Handled;
+        }
+      } catch (...) {
+        res.status = 400;
+        return httplib::Server::HandlerResponse::Handled;
+      }
+    }
+    return httplib::Server::HandlerResponse::Unhandled;
+  });
   jh::admin::register_routes(server, config);
   jh::update::register_routes(server, config);
   jh::handlers::register_routes(server, config);

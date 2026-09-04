@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstring>
+#include <fstream>
 #include <stdexcept>
 
 namespace jh::crypto {
@@ -197,6 +198,35 @@ std::string md5_hex(const std::string& input) {
   Md5Ctx ctx;
   md5_init(&ctx);
   md5_update(&ctx, reinterpret_cast<const uint8_t*>(input.data()), input.size());
+  uint8_t digest[16];
+  md5_final(&ctx, digest);
+  static const char hex[] = "0123456789abcdef";
+  std::string out(32, '\0');
+  for (int i = 0; i < 16; ++i) {
+    out[i * 2] = hex[digest[i] >> 4];
+    out[i * 2 + 1] = hex[digest[i] & 0xF];
+  }
+  return out;
+}
+
+std::string md5_file(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return "";
+  }
+  Md5Ctx ctx;
+  md5_init(&ctx);
+  std::array<char, 64 * 1024> buffer{};
+  while (in) {
+    in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize count = in.gcount();
+    if (count > 0) {
+      md5_update(&ctx, reinterpret_cast<const uint8_t*>(buffer.data()), static_cast<size_t>(count));
+    }
+  }
+  if (!in.eof()) {
+    return "";
+  }
   uint8_t digest[16];
   md5_final(&ctx, digest);
   static const char hex[] = "0123456789abcdef";
