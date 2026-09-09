@@ -10,3 +10,13 @@ CREATE TABLE IF NOT EXISTS accounts (
   PRIMARY KEY (id),
   UNIQUE KEY uk_acc (acc)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash CHAR(32) NOT NULL,
+  acc VARCHAR(128) NOT NULL,
+  expires_at BIGINT NOT NULL,
+  created_at BIGINT NOT NULL,
+  PRIMARY KEY (token_hash),
+  KEY idx_sessions_acc (acc),
+  KEY idx_sessions_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

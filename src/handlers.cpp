@@ -4,6 +4,7 @@
 #include "jh/crypto.hpp"
 #include "jh/mail.hpp"
 #include "jh/save_blob.hpp"
+#include "jh/session.hpp"
 #include "jh/storage.hpp"
 #include "jh/update.hpp"
 
@@ -329,6 +330,20 @@ json api_err(const std::string& msg, int code = 1) {
   return json{{"code", code}, {"msg", msg}};
 }
 
+bool requires_session(const std::string& action) {
+  return action == "getInitData" || action == "findSave" || action == "uploadSave" ||
+         action == "downloadSave";
+}
+
+bool bind_session_identity(json& req) {
+  const auto acc = session_validate(req.value("session", ""));
+  if (!acc) {
+    return false;
+  }
+  req["acc"] = *acc;
+  return true;
+}
+
 json handle_find_save(const json& req) {
   const std::string acc = req.value("acc", "");
   int area = req.value("area", 0);
@@ -413,7 +428,15 @@ json handle_login(const json& req) {
   if (auth.result != AuthResult::Ok) {
     return json{{"code", 1}, {"msg", auth.message}};
   }
-  return json{{"code", 0}, {"save_syn", 0}, {"fight_syn", 0}};
+  const auto session = session_issue(acc);
+  if (!session) {
+    return json{{"code", 1}, {"msg", "session create failed"}};
+  }
+  return json{{"code", 0},
+              {"save_syn", 0},
+              {"fight_syn", 0},
+              {"session", session->token},
+              {"session_exp", session->expires_at}};
 }
 
 json handle_sms_code(const json& req) {
@@ -468,8 +491,8 @@ json handle_upload_save_fields(const std::string& acc, int area, const std::stri
   return api_ok(json{{"msg", "上传成功"}});
 }
 
-json handle_upload_save_plain(const std::string& plain) {
-  const std::string acc = json_get_string(plain, "acc").value_or("");
+json handle_upload_save_plain(const std::string& plain, const std::string& authenticated_acc) {
+  const std::string acc = authenticated_acc;
   const int area = json_get_int(plain, "area").value_or(1);
   const std::string save_str = json_get_string(plain, "save").value_or("");
   std::string username = json_get_string(plain, "username").value_or("");
@@ -544,7 +567,15 @@ json handle_mail(const json& req) {
   if (auth.result != AuthResult::Ok) {
     return json{{"code", 1}, {"msg", auth.message}};
   }
-  return json{{"code", 0}, {"save_syn", 0}, {"fight_syn", 0}};
+  const auto session = session_issue(acc);
+  if (!session) {
+    return json{{"code", 1}, {"msg", "session create failed"}};
+  }
+  return json{{"code", 0},
+              {"save_syn", 0},
+              {"fight_syn", 0},
+              {"session", session->token},
+              {"session_exp", session->expires_at}};
 }
 
 json handle_stub(const json& /*req*/) {
@@ -604,9 +635,15 @@ void handle_post(const httplib::Request& req, httplib::Response& res, const Serv
     } else if (ctx.action == "uploadSave") {
       const std::string plain = crypto::decrypt_payload(trim_string(req.body), ctx.ver);
       std::cerr << "[uploadSave] decrypted=" << plain.size() << std::endl << std::flush;
-      out = handle_upload_save_plain(plain);
+      const auto account = session_validate(json_get_string(plain, "session").value_or(""));
+      out = account ? handle_upload_save_plain(plain, *account) : api_err("session required", 401);
     } else if (crypto::is_encrypted_body_action(ctx.action)) {
-      out = dispatch(ctx, parse_encrypted_body(trim_string(req.body), ctx.ver));
+      json body = parse_encrypted_body(trim_string(req.body), ctx.ver);
+      if (requires_session(ctx.action) && !bind_session_identity(body)) {
+        out = api_err("session required", 401);
+      } else {
+        out = dispatch(ctx, body);
+      }
     } else {
       out = dispatch(ctx, req.body.empty() ? json::object() : json::parse(req.body));
     }
@@ -640,14 +677,6 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
     res.set_content(R"({"status":"ok"})", "application/json");
   });
 
-  server.Get("/debug/key", [&config](const httplib::Request& req, httplib::Response& res) {
-    int ver = config.game_version;
-    if (req.has_param("ver")) {
-      ver = std::stoi(req.get_param_value("ver"));
-    }
-    json j{{"ver", ver}, {"key", crypto::get_zhiling_psw(ver)}};
-    res.set_content(j.dump(), "application/json");
-  });
 }
 
 }  // namespace jh::handlers

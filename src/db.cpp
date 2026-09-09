@@ -112,6 +112,17 @@ void ensure_schema() {
       UNIQUE KEY uk_acc (acc)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   )");
+  exec_sql(R"(
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash CHAR(32) NOT NULL,
+      acc VARCHAR(128) NOT NULL,
+      expires_at BIGINT NOT NULL,
+      created_at BIGINT NOT NULL,
+      PRIMARY KEY (token_hash),
+      KEY idx_sessions_acc (acc),
+      KEY idx_sessions_expires (expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  )");
 }
 
 void upsert_admin(const std::string& admin_acc, const std::string& admin_psw) {
@@ -287,6 +298,7 @@ bool db_delete_account(const std::string& acc) {
   if (!g_conn) {
     return false;
   }
+  exec_sql("DELETE FROM sessions WHERE acc='" + sql_escape(acc) + "'");
   exec_sql("DELETE FROM accounts WHERE acc='" + sql_escape(acc) + "'");
   return mysql_affected_rows(g_conn) > 0;
 }
@@ -346,6 +358,48 @@ uint32_t db_next_id_hint() {
   }
   mysql_free_result(res);
   return next;
+}
+
+bool db_insert_session(const std::string& acc, const std::string& token_hash, int64_t expires_at) {
+  std::lock_guard<std::mutex> lock(g_mu);
+  if (!g_conn || acc.empty() || token_hash.size() != 32) {
+    return false;
+  }
+  const int64_t now = now_sec();
+  exec_sql("DELETE FROM sessions WHERE expires_at<" + std::to_string(now));
+  exec_sql("INSERT INTO sessions (token_hash, acc, expires_at, created_at) VALUES ('" +
+           sql_escape(token_hash) + "','" + sql_escape(acc) + "'," + std::to_string(expires_at) + "," +
+           std::to_string(now) + ")");
+  return true;
+}
+
+std::optional<DbSession> db_find_session(const std::string& token_hash) {
+  std::lock_guard<std::mutex> lock(g_mu);
+  if (!g_conn || token_hash.size() != 32) {
+    return std::nullopt;
+  }
+  exec_sql("SELECT acc, expires_at FROM sessions WHERE token_hash='" + sql_escape(token_hash) +
+           "' AND expires_at>=" + std::to_string(now_sec()) + " LIMIT 1");
+  MYSQL_RES* res = mysql_store_result(g_conn);
+  if (!res) {
+    return std::nullopt;
+  }
+  MYSQL_ROW row = mysql_fetch_row(res);
+  std::optional<DbSession> out;
+  if (row && row[0] && row[1]) {
+    out = DbSession{row[0], std::strtoll(row[1], nullptr, 10)};
+  }
+  mysql_free_result(res);
+  return out;
+}
+
+bool db_revoke_sessions(const std::string& acc) {
+  std::lock_guard<std::mutex> lock(g_mu);
+  if (!g_conn || acc.empty()) {
+    return false;
+  }
+  exec_sql("DELETE FROM sessions WHERE acc='" + sql_escape(acc) + "'");
+  return true;
 }
 
 }  // namespace jh

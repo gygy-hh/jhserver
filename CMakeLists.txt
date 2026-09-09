@@ -15,6 +15,7 @@ add_executable(jh_server
   src/handlers.cpp
   src/admin.cpp
   src/auth.cpp
+  src/session.cpp
   src/db.cpp
   src/storage.cpp
   src/mail.cpp

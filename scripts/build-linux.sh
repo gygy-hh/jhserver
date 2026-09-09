@@ -15,6 +15,7 @@ g++ -std=c++17 -O1 -g0 \
   "$ROOT"/src/handlers.cpp \
   "$ROOT"/src/admin.cpp \
   "$ROOT"/src/auth.cpp \
+  "$ROOT"/src/session.cpp \
   "$ROOT"/src/db.cpp \
   "$ROOT"/src/storage.cpp \
   "$ROOT"/src/mail.cpp \

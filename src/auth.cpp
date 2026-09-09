@@ -2,6 +2,7 @@
 
 #include "jh/crypto.hpp"
 #include "jh/db.hpp"
+#include "jh/session.hpp"
 
 #include <chrono>
 #include <random>
@@ -159,6 +160,7 @@ bool auth_set_password(const std::string& acc, const std::string& new_psw, std::
     error = "save failed";
     return false;
   }
+  session_revoke_account(acc);
   return true;
 }
 

@@ -19,6 +19,11 @@ struct DbAccount {
   bool has_password() const { return !psw_hash.empty(); }
 };
 
+struct DbSession {
+  std::string acc;
+  int64_t expires_at = 0;
+};
+
 bool db_init(const MysqlConfig& config, const std::string& admin_acc, const std::string& admin_psw,
              const std::string& legacy_accounts_path = "");
 void db_shutdown();
@@ -31,5 +36,9 @@ bool db_delete_account(const std::string& acc);
 std::vector<DbAccount> db_list_accounts();
 size_t db_account_count();
 uint32_t db_next_id_hint();
+
+bool db_insert_session(const std::string& acc, const std::string& token_hash, int64_t expires_at);
+std::optional<DbSession> db_find_session(const std::string& token_hash);
+bool db_revoke_sessions(const std::string& acc);
 
 }  // namespace jh
