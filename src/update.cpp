@@ -1,4 +1,4 @@
-#include "jh/update.hpp"
+﻿#include "jh/update.hpp"
 
 #include "jh/crypto.hpp"
 
@@ -435,30 +435,35 @@ void sync_json_download_file_unlocked(const Manifest& m) {
   out << doc.dump(2);
 }
 
-void save_manifest_unlocked(const Manifest& m) {
-  fs::create_directories(updates_dir());
+bool save_manifest_unlocked(const Manifest& m) {
+  std::error_code dir_ec;
+  fs::create_directories(updates_dir(), dir_ec);
+  if (dir_ec) {
+    return false;
+  }
   const std::string temp_path = manifest_path() + ".tmp";
   {
     std::ofstream out(temp_path, std::ios::trunc);
     out << manifest_to_json(m).dump(2);
     out.flush();
     if (!out) {
-      return;
+      return false;
     }
   }
   std::error_code ec;
   fs::rename(temp_path, manifest_path(), ec);
   if (ec) {
-    // Windows 不允许 rename 覆盖；线上 Linux 走上面的原子替换。
+    // Windows rename cannot overwrite; Linux uses atomic replace above.
     std::error_code fallback_ec;
     fs::remove(manifest_path(), fallback_ec);
     fs::rename(temp_path, manifest_path(), fallback_ec);
     if (fallback_ec) {
       fs::remove(temp_path, fallback_ec);
-      return;
+      return false;
     }
   }
   sync_json_download_file_unlocked(m);
+  return true;
 }
 
 void ensure_defaults_unlocked() {
@@ -616,8 +621,7 @@ bool save_manifest(const Manifest& manifest) {
   std::lock_guard<std::mutex> lock(g_mu);
   Manifest m = manifest;
   m.updated_at = static_cast<int64_t>(std::time(nullptr));
-  save_manifest_unlocked(m);
-  return true;
+  return save_manifest_unlocked(m);
 }
 
 json get_huo_dong() {
@@ -963,22 +967,66 @@ void register_admin_routes(httplib::Server& server, const ServerConfig& config) 
         "application/json; charset=utf-8");
   });
 
-  server.Post("/admin/api/update/integrity-apk",
-              [](const httplib::Request& req, httplib::Response& res,
-                 const httplib::ContentReader& content_reader) {
-    const auto upload =
-        receive_stream_upload(req, res, content_reader, fs::path(integrity_dir()), "integrity.apk");
-    if (!upload) {
+  server.Post("/admin/api/update/integrity-md5", [](const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+      body = json::parse(req.body.empty() ? "{}" : req.body);
+    } catch (...) {
+      res.status = 400;
+      res.set_content(R"({"error":"invalid json"})", "application/json; charset=utf-8");
       return;
     }
+
+    std::string md5 = body.value("apk_md5", "");
+    for (char& c : md5) {
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (md5.size() != 32 ||
+        !std::all_of(md5.begin(), md5.end(), [](unsigned char c) { return std::isxdigit(c) != 0; })) {
+      res.status = 400;
+      res.set_content(R"({"error":"apk_md5 must be 32 hex chars"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+
+    uint64_t apk_size = 0;
+    if (body.contains("apk_size")) {
+      try {
+        if (body["apk_size"].is_number_unsigned() || body["apk_size"].is_number_integer()) {
+          if (body["apk_size"].get<int64_t>() < 0) {
+            throw std::runtime_error("negative");
+          }
+          apk_size = body["apk_size"].get<uint64_t>();
+        } else if (body["apk_size"].is_string()) {
+          apk_size = static_cast<uint64_t>(std::stoull(body["apk_size"].get<std::string>()));
+        } else {
+          throw std::runtime_error("bad type");
+        }
+      } catch (...) {
+        res.status = 400;
+        res.set_content(R"({"error":"invalid apk_size"})", "application/json; charset=utf-8");
+        return;
+      }
+    }
+
+    std::string filename = body.value("filename", "local.apk");
+    if (filename.empty() || filename.find('/') != std::string::npos ||
+        filename.find('\\') != std::string::npos || filename.find("..") != std::string::npos) {
+      filename = "local.apk";
+    }
+    if (filename.size() > 128) {
+      filename = filename.substr(0, 128);
+    }
+
     Manifest m = get_manifest();
-    m.integrity_apk_file = upload->filename;
-    if (!refresh_apk_integrity_unlocked(m)) {
+    m.apk_md5 = md5;
+    m.apk_size = apk_size;
+    m.integrity_apk_file = filename;
+    if (!save_manifest(m)) {
       res.status = 500;
-      res.set_content(R"({"error":"md5 failed"})", "application/json; charset=utf-8");
+      res.set_content(R"({"error":"manifest save failed"})", "application/json; charset=utf-8");
       return;
     }
-    save_manifest(m);
     res.set_content(
         json{{"ok", true},
              {"integrity_apk_file", m.integrity_apk_file},

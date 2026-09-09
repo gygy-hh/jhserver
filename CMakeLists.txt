@@ -77,6 +77,12 @@ else()
     ${mariadb_connector_SOURCE_DIR}/include
     ${mariadb_connector_BINARY_DIR}/include
   )
+  if(TARGET zlib)
+    get_target_property(_jh_zlib_src zlib SOURCE_DIR)
+    get_target_property(_jh_zlib_bin zlib BINARY_DIR)
+    target_include_directories(jh_server PRIVATE ${_jh_zlib_src} ${_jh_zlib_bin})
+    target_link_libraries(jh_server PRIVATE zlib)
+  endif()
   add_custom_command(TARGET jh_server POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mariadbclient>"

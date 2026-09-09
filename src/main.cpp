@@ -59,8 +59,7 @@ int main(int argc, char** argv) {
         return httplib::Server::HandlerResponse::Handled;
       }
     }
-    const bool is_stream_upload =
-        req.path == "/admin/api/update/apk" || req.path == "/admin/api/update/integrity-apk";
+    const bool is_stream_upload = req.path == "/admin/api/update/apk";
     if (!is_stream_upload && req.has_header("Content-Length")) {
       try {
         if (std::stoull(req.get_header_value("Content-Length")) > 64ULL * 1024 * 1024) {
