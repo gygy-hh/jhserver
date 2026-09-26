@@ -326,13 +326,27 @@ json api_ok(const json& extra = json::object()) {
   return resp;
 }
 
+constexpr int64_t kManualSaveIntervalSec = 7LL * 24 * 60 * 60;
+
+int64_t manual_remain_sec(int64_t last_at, int64_t now) {
+  if (last_at <= 0) {
+    return 0;
+  }
+  const int64_t left = last_at + kManualSaveIntervalSec - now;
+  return left > 0 ? left : 0;
+}
+
+std::string manual_remain_msg(const char* action, int64_t remain_sec) {
+  const int64_t days = (remain_sec + 24 * 60 * 60 - 1) / (24 * 60 * 60);
+  return std::string(action) + "\u9700\u95f4\u96947\u5929\uff0c\u5269\u4f59\u7ea6" + std::to_string(days) + "\u5929";
+}
+
 json api_err(const std::string& msg, int code = 1) {
   return json{{"code", code}, {"msg", msg}};
 }
 
 bool requires_session(const std::string& action) {
-  return action == "getInitData" || action == "findSave" || action == "uploadSave" ||
-         action == "downloadSave";
+  return action == "getInitData";
 }
 
 bool bind_session_identity(json& req) {
@@ -461,10 +475,20 @@ json handle_upload_save_fields(const std::string& acc, int area, const std::stri
     resolved_area = 1;
   }
 
+  const int64_t now = std::time(nullptr);
   storage::SaveMeta meta;
   meta.username = username.empty() ? acc : username;
   meta.lev = lev > 0 ? lev : 1;
-  meta.save_time = std::time(nullptr);
+  meta.save_time = now;
+  meta.manual_upload_at = now;
+  if (auto existing = storage::get_save_meta(acc, resolved_area)) {
+    const int64_t last_upload = existing->manual_upload_at > 0 ? existing->manual_upload_at : existing->save_time;
+    const int64_t remain = manual_remain_sec(last_upload, now);
+    if (remain > 0) {
+      return api_err(manual_remain_msg("\u624b\u52a8\u4e0a\u4f20", remain));
+    }
+    meta.manual_download_at = existing->manual_download_at;
+  }
 
   std::cerr << "[uploadSave] acc=" << acc << " area=" << resolved_area << " bytes=" << save_str.size() << std::endl
             << std::flush;
@@ -525,6 +549,13 @@ json handle_download_save(const json& req) {
   if (acc.empty()) {
     return api_err("acc required");
   }
+  const int64_t now = std::time(nullptr);
+  if (auto meta = storage::get_save_meta(acc, area)) {
+    const int64_t remain = manual_remain_sec(meta->manual_download_at, now);
+    if (remain > 0) {
+      return api_err(manual_remain_msg("\u624b\u52a8\u4e0b\u8f7d", remain));
+    }
+  }
   auto save = storage::load_cloud(acc, area);
   if (!save) {
     std::cerr << "[downloadSave] no save acc=" << acc << " area=" << area << std::endl;
@@ -556,6 +587,7 @@ json handle_download_save(const json& req) {
     std::cerr << "[downloadSave] mail inject skipped: " << ex.what() << std::endl;
   }
 
+  storage::mark_manual_download(acc, area, now);
   std::cerr << "[downloadSave] acc=" << acc << " area=" << area << " bytes=" << save->size() << std::endl;
   return json{{"code", 0}, {"msg", ""}, {"data", json{{"save", *save}}}, {"save", *save}};
 }
@@ -635,8 +667,8 @@ void handle_post(const httplib::Request& req, httplib::Response& res, const Serv
     } else if (ctx.action == "uploadSave") {
       const std::string plain = crypto::decrypt_payload(trim_string(req.body), ctx.ver);
       std::cerr << "[uploadSave] decrypted=" << plain.size() << std::endl << std::flush;
-      const auto account = session_validate(json_get_string(plain, "session").value_or(""));
-      out = account ? handle_upload_save_plain(plain, *account) : api_err("session required", 401);
+      const std::string acc = json_get_string(plain, "acc").value_or("");
+      out = handle_upload_save_plain(plain, acc);
     } else if (crypto::is_encrypted_body_action(ctx.action)) {
       json body = parse_encrypted_body(trim_string(req.body), ctx.ver);
       if (requires_session(ctx.action) && !bind_session_identity(body)) {

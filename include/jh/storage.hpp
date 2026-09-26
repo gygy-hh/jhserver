@@ -32,6 +32,8 @@ struct SaveMeta {
   std::string username;
   int lev = 1;
   int64_t save_time = 0;
+  int64_t manual_upload_at = 0;
+  int64_t manual_download_at = 0;
 };
 
 struct ServerStats {
@@ -52,6 +54,7 @@ std::vector<AccountRecord> list_accounts();
 std::vector<AccountAuthInfo> list_accounts_auth();
 
 bool save_cloud(const std::string& acc, int area, const std::string& save_json, const SaveMeta& meta);
+bool mark_manual_download(const std::string& acc, int area, int64_t at);
 std::optional<std::string> load_cloud(const std::string& acc, int area);
 std::optional<SaveMeta> get_save_meta(const std::string& acc, int area);
 std::vector<SaveRecord> list_saves();

@@ -27,6 +27,9 @@ tr:last-child td{border-bottom:none}
 .btn-primary{background:var(--accent);color:#fff}
 .btn-danger{background:var(--danger);color:#fff}
 .toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap}
+.toolbar-actions{display:flex;align-items:center;gap:8px}
+.account-filter{width:220px;padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:#111827;color:var(--text)}
+.account-filter:focus{outline:none;border-color:var(--accent)}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:20px;z-index:10}
 .modal.open{display:flex}
 .modal-box{background:var(--card);border:1px solid var(--border);border-radius:12px;max-width:900px;width:100%;max-height:80vh;overflow:auto;padding:20px}
@@ -58,7 +61,13 @@ pre{white-space:pre-wrap;word-break:break-all;background:#111827;padding:12px;bo
   </div>
   <div class="msg" id="msg"></div>
   <div class="panel active" id="panel-accounts">
-    <div class="toolbar"><strong>账号列表</strong><button class="btn btn-primary" id="btnRefreshAccounts">刷新</button></div>
+    <div class="toolbar">
+      <strong>账号列表</strong>
+      <div class="toolbar-actions">
+        <input class="account-filter" id="accountFilter" type="search" placeholder="输入账号筛选" autocomplete="off">
+        <button class="btn btn-primary" id="btnRefreshAccounts">刷新</button>
+      </div>
+    </div>
     <table><thead><tr><th>账号</th><th>ID</th><th>MTT</th><th>密码</th><th>操作</th></tr></thead><tbody id="accountsBody"></tbody></table>
   </div>
   <div class="panel" id="panel-saves">
@@ -218,13 +227,13 @@ async function loadStats() {
   document.getElementById('configBox').innerHTML = '<pre>' + esc(JSON.stringify(data, null, 2)) + '</pre>';
 }
 
-async function loadAccounts() {
-  const res = await api('/admin/api/accounts');
-  const data = await res.json();
-  const items = data.items || [];
+let accountItems = [];
+
+function renderAccounts(items) {
   const tbody = document.getElementById('accountsBody');
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="5">暂无账号</td></tr>';
+    const filtering = document.getElementById('accountFilter').value.trim();
+    tbody.innerHTML = '<tr><td colspan="5">' + (filtering ? '未找到匹配账号' : '暂无账号') + '</td></tr>';
     return;
   }
   tbody.innerHTML = items.map(function(a) {
@@ -239,6 +248,21 @@ async function loadAccounts() {
   tbody.querySelectorAll('button[data-reset]').forEach(function(btn) {
     btn.onclick = function() { resetPassword(btn.getAttribute('data-reset')); };
   });
+}
+
+function filterAccounts() {
+  const keyword = document.getElementById('accountFilter').value.trim().toLowerCase();
+  const items = keyword
+    ? accountItems.filter(function(a) { return String(a.acc).toLowerCase().includes(keyword); })
+    : accountItems;
+  renderAccounts(items);
+}
+
+async function loadAccounts() {
+  const res = await api('/admin/api/accounts');
+  const data = await res.json();
+  accountItems = data.items || [];
+  filterAccounts();
 }
 
 async function resetPassword(acc) {
@@ -814,6 +838,7 @@ document.querySelectorAll('.tab').forEach(function(btn) {
 });
 
 document.getElementById('btnRefreshAccounts').onclick = loadAccounts;
+document.getElementById('accountFilter').oninput = filterAccounts;
 document.getElementById('btnRefreshSaves').onclick = loadSaves;
 document.getElementById('btnRefreshMails').onclick = loadMails;
 document.getElementById('btnSendMail').onclick = sendMail;

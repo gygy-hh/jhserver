@@ -115,6 +115,8 @@ bool save_cloud(const std::string& acc, int area, const std::string& save_json, 
       {"username", meta.username},
       {"lev", meta.lev},
       {"save_time", save_time},
+      {"manual_upload_at", meta.manual_upload_at > 0 ? meta.manual_upload_at : now},
+      {"manual_download_at", meta.manual_download_at},
       {"save_bytes", save_json.size()},
   };
   out << wrapper.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
@@ -135,10 +137,36 @@ std::optional<SaveMeta> get_save_meta(const std::string& acc, int area) {
     meta.username = j.value("username", acc);
     meta.lev = j.value("lev", 1);
     meta.save_time = j.value("save_time", j.value("updated_at", static_cast<int64_t>(0)));
+    meta.manual_upload_at = j.value("manual_upload_at", static_cast<int64_t>(0));
+    meta.manual_download_at = j.value("manual_download_at", static_cast<int64_t>(0));
     return meta;
   } catch (...) {
   }
   return std::nullopt;
+}
+
+bool mark_manual_download(const std::string& acc, int area, int64_t at) {
+  std::lock_guard<std::mutex> lock(g_mu);
+  const std::string path = save_path(acc, area);
+  std::ifstream in(path);
+  if (!in) {
+    return false;
+  }
+  nlohmann::json j;
+  try {
+    in >> j;
+  } catch (...) {
+    return false;
+  }
+  in.close();
+  j["manual_download_at"] = at > 0 ? at : std::time(nullptr);
+  std::ofstream out(path, std::ios::trunc);
+  if (!out) {
+    return false;
+  }
+  out << j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+  out.flush();
+  return static_cast<bool>(out);
 }
 
 std::optional<std::string> load_cloud(const std::string& acc, int area) {
