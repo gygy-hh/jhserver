@@ -290,6 +290,24 @@ ServerConfig load_config(int argc, char** argv) {
           cfg.mysql.database = mysql["database"].get<std::string>();
         }
       }
+      if (j.contains("redis") && j["redis"].is_object()) {
+        const auto& redis = j["redis"];
+        if (redis.contains("host")) {
+          cfg.redis.host = redis["host"].get<std::string>();
+        }
+        if (redis.contains("port")) {
+          cfg.redis.port = redis["port"].get<int>();
+        }
+        if (redis.contains("password")) {
+          cfg.redis.password = redis["password"].get<std::string>();
+        }
+        if (redis.contains("database")) {
+          cfg.redis.database = redis["database"].get<int>();
+        }
+        if (redis.contains("connect_timeout_ms")) {
+          cfg.redis.connect_timeout_ms = redis["connect_timeout_ms"].get<int>();
+        }
+      }
       if (j.contains("min_password_len")) {
         cfg.min_password_len = j["min_password_len"].get<int>();
       }

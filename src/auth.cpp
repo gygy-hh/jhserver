@@ -168,6 +168,24 @@ bool auth_reset_password(const std::string& acc, const std::string& new_psw, std
   return auth_set_password(acc, new_psw, error);
 }
 
+bool auth_change_password(const std::string& acc, const std::string& old_psw,
+                          const std::string& new_psw, std::string& error) {
+  const AuthOutcome current = login_existing(acc, old_psw);
+  if (current.result != AuthResult::Ok) {
+    error = current.message;
+    return false;
+  }
+  if (old_psw == new_psw) {
+    error = "new password unchanged";
+    return false;
+  }
+  if (new_psw.size() > 64) {
+    error = "password too long";
+    return false;
+  }
+  return auth_set_password(acc, new_psw, error);
+}
+
 std::string auth_result_message(AuthResult result) {
   switch (result) {
     case AuthResult::Ok:

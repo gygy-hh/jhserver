@@ -19,13 +19,18 @@ struct AccountAuthInfo {
   std::string psw_salt;
   std::string psw_hash;
   int64_t created_at = 0;
+  bool bl_exempt = false;
 };
 
 struct SaveRecord {
   std::string acc;
+  std::string username;
   int area = 0;
+  int lev = 1;
   int64_t updated_at = 0;
   size_t size = 0;
+  bool has_blob = false;
+  bool has_meta = false;
 };
 
 struct SaveMeta {
@@ -50,11 +55,14 @@ std::optional<AccountAuthInfo> get_account_auth(const std::string& acc);
 std::optional<AccountRecord> create_account_with_password(const std::string& acc, const std::string& salt,
                                                           const std::string& hash);
 bool set_account_password(const std::string& acc, const std::string& salt, const std::string& hash);
+bool is_bl_exempt(const std::string& acc);
+bool set_bl_exempt(const std::string& acc, bool exempt);
 std::vector<AccountRecord> list_accounts();
 std::vector<AccountAuthInfo> list_accounts_auth();
 
 bool save_cloud(const std::string& acc, int area, const std::string& save_json, const SaveMeta& meta);
 bool mark_manual_download(const std::string& acc, int area, int64_t at);
+bool clear_manual_download(const std::string& acc, int area);
 std::optional<std::string> load_cloud(const std::string& acc, int area);
 std::optional<SaveMeta> get_save_meta(const std::string& acc, int area);
 std::vector<SaveRecord> list_saves();

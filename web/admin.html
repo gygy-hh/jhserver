@@ -16,14 +16,16 @@ header p{margin:4px 0 0;color:var(--muted);font-size:13px}
 .card .label{color:var(--muted);font-size:12px;margin-bottom:8px}
 .card .value{font-size:28px;font-weight:700}
 .tabs{display:flex;gap:8px;margin-bottom:16px}
-.tab{padding:10px 16px;border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:8px;cursor:pointer}
+.tab{padding:10px 16px;border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:8px;cursor:pointer;transition:transform .1s ease,filter .15s ease,opacity .15s ease}
 .tab.active{background:var(--accent);border-color:var(--accent)}
+.tab:active,.btn:active{transform:scale(.96);filter:brightness(.78)}
 .panel{display:none}.panel.active{display:block}
 table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
 th,td{padding:12px 14px;text-align:left;border-bottom:1px solid var(--border);font-size:14px}
 th{background:#111827;color:var(--muted);font-weight:600}
 tr:last-child td{border-bottom:none}
-.btn{padding:6px 12px;border:none;border-radius:6px;cursor:pointer;font-size:13px;margin-right:6px}
+.btn{padding:6px 12px;border:none;border-radius:6px;cursor:pointer;font-size:13px;margin-right:6px;transition:transform .1s ease,filter .15s ease,opacity .15s ease}
+.btn:disabled{cursor:not-allowed;opacity:.55}
 .btn-primary{background:var(--accent);color:#fff}
 .btn-danger{background:var(--danger);color:#fff}
 .toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap}
@@ -43,6 +45,15 @@ pre{white-space:pre-wrap;word-break:break-all;background:#111827;padding:12px;bo
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
 .badge-pending{background:#854d0e;color:#fef3c7}
 .badge-delivered{background:#14532d;color:#bbf7d0}
+.badge-exempt{background:#14532d;color:#bbf7d0}
+.badge-suppress{background:#7f1d1d;color:#fecaca}
+.request-overlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:rgba(3,7,18,.42);opacity:0;visibility:hidden;transition:opacity .16s ease,visibility .16s ease;cursor:wait}
+.request-overlay.open{opacity:1;visibility:visible}
+.request-indicator{display:flex;align-items:center;gap:11px;padding:13px 18px;border:1px solid var(--border);border-radius:10px;background:#111827;color:var(--text);box-shadow:0 10px 35px rgba(0,0,0,.35);font-size:14px}
+.spinner{width:19px;height:19px;border:3px solid #52627a;border-top-color:#60a5fa;border-radius:50%;animation:spin .72s linear infinite}
+body.request-busy header,body.request-busy .wrap{filter:brightness(.72);transition:filter .16s ease}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spinner{animation:none}.btn,.tab,.request-overlay{transition:none}}
 </style>
 </head>
 <body>
@@ -71,43 +82,50 @@ pre{white-space:pre-wrap;word-break:break-all;background:#111827;padding:12px;bo
     <table><thead><tr><th>账号</th><th>ID</th><th>MTT</th><th>密码</th><th>操作</th></tr></thead><tbody id="accountsBody"></tbody></table>
   </div>
   <div class="panel" id="panel-saves">
-    <div class="toolbar"><strong>云存档</strong><button class="btn btn-primary" id="btnRefreshSaves">刷新</button></div>
-    <table><thead><tr><th>账号</th><th>区服</th><th>大小</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="savesBody"></tbody></table>
+    <div class="toolbar">
+      <strong>云存档</strong>
+      <div class="toolbar-actions">
+        <input class="account-filter" id="saveFilter" type="search" placeholder="筛选账号 / 角色 / 区服" autocomplete="off">
+        <button class="btn btn-primary" id="btnRefreshSaves">刷新</button>
+      </div>
+    </div>
+    <table><thead><tr><th>账号</th><th>角色</th><th>区服</th><th>等级</th><th>大小</th><th>更新时间</th><th>状态</th><th>操作</th></tr></thead><tbody id="savesBody"></tbody></table>
   </div>
   <div class="panel" id="panel-mails">
     <div class="card" style="margin-bottom:16px">
       <strong>发送邮件（物品奖励）</strong>
-      <p class="hint">点击发送后，在线客户端会在下一次 getInitData 轮询时直接获得物品，无需下载云存档；切回前台可立即触发，正常最多约 2 分钟。</p>
+      <p class="hint">同一渠道、账号和区服只保留一封邮件，后发覆盖前发；邮件有效期为 2 小时，并在客户端下一次 getInitData 时下发。</p>
       <div class="form-row">
+        <label>渠道<input id="mailChannel" value="xuanwu_3" placeholder="xuanwu_3"></label>
         <label>账号<input id="mailAcc" placeholder="手机号 / 账号"></label>
         <label>区服<input id="mailArea" type="number" min="1" value="1" placeholder="1"></label>
-        <label>描述<input id="mailDesp" placeholder="系统奖励" value="系统奖励"></label>
         <label>物品 JSON<textarea id="mailItems" placeholder='{"9716":10}'>{&quot;9716&quot;:10}</textarea></label>
         <button class="btn btn-primary" id="btnSendMail">发送</button>
       </div>
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <strong>发送全体邮件</strong>
+      <p class="hint">无需账号和区服；同一渠道的所有玩家均会在下一次 getInitData 时收到。有效期 2 小时，同渠道后发覆盖前发；个人邮件优先。</p>
+      <div class="form-row">
+        <label>渠道<input id="globalMailChannel" value="xuanwu_3" placeholder="xuanwu_3"></label>
+        <label>物品 JSON<textarea id="globalMailItems" placeholder='{"9716":10}'>{&quot;9716&quot;:10}</textarea></label>
+        <label>定时发送<input id="globalMailTime" type="datetime-local"></label>
+        <button class="btn btn-primary" id="btnSendGlobalMail">发送全体邮件</button>
+        <button class="btn btn-primary" id="btnScheduleGlobalMail">创建定时任务</button>
+        <button class="btn btn-primary" id="btnRefreshGlobalMail">查询</button>
+        <button class="btn btn-danger" id="btnDeleteGlobalMail">删除</button>
+      </div>
+      <div class="hint" id="globalMailStatus">尚未查询</div>
+      <table style="margin-top:12px"><thead><tr><th>任务 ID</th><th>渠道</th><th>物品</th><th>发送时间</th><th>操作</th></tr></thead><tbody id="globalMailSchedulesBody"><tr><td colspan="5">暂无定时任务</td></tr></tbody></table>
+    </div>
     <div class="toolbar">
       <strong>邮件列表</strong>
       <div class="form-row" style="margin:0">
-        <label>查询账号<input id="mailQueryAcc" placeholder="账号"></label>
-        <label>区服<input id="mailQueryArea" type="number" min="1" value="1" placeholder="1"></label>
+        <label>渠道<input id="mailQueryChannel" value="xuanwu_3" placeholder="xuanwu_3"></label>
         <button class="btn btn-primary" id="btnRefreshMails">查询</button>
       </div>
     </div>
-    <table><thead><tr><th>ID</th><th>区服</th><th>描述</th><th>物品</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody id="mailsBody"></tbody></table>
-    <div class="card" style="margin-top:16px;margin-bottom:16px">
-      <strong>全部存档群发</strong>
-      <p class="hint">按账号和区服去重发送到全部云存档。留空发送时间表示立即发送；定时任务会持久保存，服务器重启后仍有效。</p>
-      <div class="form-row">
-        <label>描述<input id="broadcastDesp" value="全服奖励"></label>
-        <label>物品 JSON<textarea id="broadcastItems" placeholder='{"9716":10}'>{&quot;9716&quot;:10}</textarea></label>
-        <label>发送时间（可选）<input id="broadcastTime" type="datetime-local"></label>
-        <button class="btn btn-primary" id="btnBroadcastNow">立即群发</button>
-        <button class="btn btn-primary" id="btnBroadcastSchedule">定时发送</button>
-      </div>
-    </div>
-    <div class="toolbar"><strong>群发任务</strong><button class="btn btn-primary" id="btnRefreshBroadcasts">刷新</button></div>
-    <table><thead><tr><th>任务 ID</th><th>描述</th><th>物品</th><th>计划时间</th><th>状态</th><th>发送数</th><th>操作</th></tr></thead><tbody id="broadcastsBody"></tbody></table>
+    <table><thead><tr><th>渠道</th><th>账号</th><th>区服</th><th>物品</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr></thead><tbody id="mailsBody"></tbody></table>
   </div>
   <div class="panel" id="panel-update">
     <div class="card" style="margin-bottom:16px">
@@ -186,6 +204,9 @@ pre{white-space:pre-wrap;word-break:break-all;background:#111827;padding:12px;bo
   <div class="toolbar"><strong id="modalTitle">存档详情</strong><button class="btn btn-primary" id="btnCloseModal">关闭</button></div>
   <pre id="modalContent"></pre>
 </div></div>
+<div class="request-overlay" id="requestOverlay" role="status" aria-live="polite" aria-hidden="true">
+  <div class="request-indicator"><span class="spinner"></span><span>处理中，请稍候…</span></div>
+</div>
 <script>
 function esc(s) {
   return String(s)
@@ -199,15 +220,61 @@ function showMsg(text) {
   document.getElementById('msg').textContent = text || '';
 }
 
+let activeRequests = 0;
+let busyStartedAt = 0;
+const nativeFetch = window.fetch.bind(window);
+
+function showRequestBusy() {
+  if (activeRequests++ === 0) {
+    busyStartedAt = Date.now();
+    document.body.classList.add('request-busy');
+    const overlay = document.getElementById('requestOverlay');
+    overlay.classList.add('open');
+    overlay.setAttribute('aria-hidden', 'false');
+  }
+}
+
+function hideRequestBusy() {
+  activeRequests = Math.max(0, activeRequests - 1);
+  if (activeRequests !== 0) return;
+  const finish = function() {
+    if (activeRequests !== 0) return;
+    document.body.classList.remove('request-busy');
+    const overlay = document.getElementById('requestOverlay');
+    overlay.classList.remove('open');
+    overlay.setAttribute('aria-hidden', 'true');
+  };
+  const remain = Math.max(0, 220 - (Date.now() - busyStartedAt));
+  if (remain > 0) setTimeout(finish, remain);
+  else finish();
+}
+
+window.fetch = async function() {
+  showRequestBusy();
+  try {
+    return await nativeFetch.apply(window, arguments);
+  } finally {
+    hideRequestBusy();
+  }
+};
+
 async function api(path, opts) {
   opts = opts || {};
-  const res = await fetch(path, opts);
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (e) {
+    showMsg('网络请求失败，请稍后重试');
+    throw e;
+  }
   if (!res.ok) {
     let detail = '';
     try {
       detail = await res.text();
     } catch (e) {}
-    throw new Error('请求失败: ' + res.status + (detail ? ' ' + detail.slice(0, 200) : ''));
+    const error = new Error('请求失败: ' + res.status + (detail ? ' ' + detail.slice(0, 200) : ''));
+    showMsg(error.message);
+    throw error;
   }
   return res;
 }
@@ -282,25 +349,39 @@ async function resetPassword(acc) {
   loadAccounts();
 }
 
-async function loadSaves() {
-  const res = await api('/admin/api/saves');
-  const data = await res.json();
-  const items = data.items || [];
+let saveItems = [];
+
+function renderSaves(items) {
   const tbody = document.getElementById('savesBody');
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="5">暂无存档</td></tr>';
+    const filtering = document.getElementById('saveFilter').value.trim();
+    tbody.innerHTML = '<tr><td colspan="8">' + (filtering ? '未找到匹配存档' : '暂无存档') + '</td></tr>';
     return;
   }
   tbody.innerHTML = items.map(function(s) {
-    return '<tr><td>' + esc(s.acc) + '</td><td>' + s.area + '</td><td>' + esc(s.size_text) + '</td><td>' +
-      esc(s.updated_at_text) + '</td><td>' +
-      '<button class="btn btn-primary" data-acc="' + esc(s.acc) + '" data-area="' + s.area + '">查看</button>' +
+    const status = s.has_blob
+      ? (s.has_meta ? '<span class="badge badge-delivered">正常</span>' : '<span class="badge badge-pending">缺少元数据</span>')
+      : '<span class="badge badge-suppress">缺少存档</span>';
+    const viewButton = s.has_blob
+      ? '<button class="btn btn-primary" data-view-acc="' + esc(s.acc) + '" data-area="' + s.area + '">查看</button>'
+      : '';
+    const resetCdButton = s.has_meta
+      ? '<button class="btn btn-primary" data-reset-cd-acc="' + esc(s.acc) + '" data-area="' + s.area + '">重置CD</button>'
+      : '';
+    return '<tr><td>' + esc(s.acc) + '</td><td>' + esc(s.username || s.acc) + '</td><td>' + s.area +
+      '</td><td>' + esc(s.lev || 1) + '</td><td>' + esc(s.size_text) + '</td><td>' +
+      esc(s.updated_at_text) + '</td><td>' + status + '</td><td>' + viewButton + resetCdButton +
       '<button class="btn btn-danger" data-acc="' + esc(s.acc) + '" data-area="' + s.area + '">删除</button>' +
       '</td></tr>';
   }).join('');
-  tbody.querySelectorAll('button.btn-primary[data-acc]').forEach(function(btn) {
+  tbody.querySelectorAll('button[data-view-acc]').forEach(function(btn) {
     btn.onclick = function() {
-      viewSave(btn.getAttribute('data-acc'), Number(btn.getAttribute('data-area')));
+      viewSave(btn.getAttribute('data-view-acc'), Number(btn.getAttribute('data-area')));
+    };
+  });
+  tbody.querySelectorAll('button[data-reset-cd-acc]').forEach(function(btn) {
+    btn.onclick = function() {
+      resetSaveDownloadCd(btn.getAttribute('data-reset-cd-acc'), Number(btn.getAttribute('data-area')));
     };
   });
   tbody.querySelectorAll('button.btn-danger[data-acc]').forEach(function(btn) {
@@ -308,6 +389,25 @@ async function loadSaves() {
       delSave(btn.getAttribute('data-acc'), Number(btn.getAttribute('data-area')));
     };
   });
+}
+
+function filterSaves() {
+  const keyword = document.getElementById('saveFilter').value.trim().toLowerCase();
+  const items = keyword
+    ? saveItems.filter(function(s) {
+        return String(s.acc).toLowerCase().includes(keyword) ||
+          String(s.username || '').toLowerCase().includes(keyword) ||
+          String(s.area).includes(keyword);
+      })
+    : saveItems;
+  renderSaves(items);
+}
+
+async function loadSaves() {
+  const res = await api('/admin/api/saves');
+  const data = await res.json();
+  saveItems = data.items || [];
+  filterSaves();
 }
 
 async function viewSave(acc, area) {
@@ -326,6 +426,21 @@ async function delSave(acc, area) {
   loadStats();
 }
 
+async function resetSaveDownloadCd(acc, area) {
+  if (!confirm('清空存档 ' + acc + ' 区服 ' + area + ' 的本次下载 CD？')) return;
+  const res = await api('/admin/api/save/download-cd/reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ acc: acc, area: area })
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    showMsg(data.error || '重置失败');
+    return;
+  }
+  showMsg('下载 CD 已重置：' + acc + ' / 区服 ' + area);
+}
+
 async function delAccount(acc) {
   if (!confirm('删除账号 ' + acc + ' 及其全部存档？')) return;
   await api('/admin/api/account?acc=' + encodeURIComponent(acc), { method: 'DELETE' });
@@ -336,53 +451,44 @@ async function delAccount(acc) {
 }
 
 async function loadMails() {
-  const acc = document.getElementById('mailQueryAcc').value.trim();
-  const area = Number(document.getElementById('mailQueryArea').value) || 1;
-  if (!acc) {
-    showMsg('请输入要查询的账号');
-    return;
-  }
-  if (area <= 0) {
-    showMsg('请输入有效的区服');
+  const channel = document.getElementById('mailQueryChannel').value.trim();
+  if (!channel || channel.indexOf(':') >= 0) {
+    showMsg('请输入有效渠道，且不能包含冒号');
     return;
   }
   showMsg('');
-  const res = await api('/admin/api/mails?acc=' + encodeURIComponent(acc) + '&area=' + area);
+  const res = await api('/admin/api/mails?channel=' + encodeURIComponent(channel));
   const data = await res.json();
   const items = data.items || [];
   const tbody = document.getElementById('mailsBody');
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="7">暂无邮件（账号 ' + esc(acc) + ' / 区服 ' + area + '，待发 ' + (data.pending || 0) + '）</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7">渠道 ' + esc(channel) + ' 暂无有效邮件</td></tr>';
     return;
   }
   tbody.innerHTML = items.map(function(m) {
-    var badgeClass = 'badge-delivered';
-    var badgeText = m.status;
-    if (m.status === 'pending') { badgeClass = 'badge-pending'; badgeText = '待推送'; }
-    else if (m.status === 'pushed') { badgeText = '已实时推送'; }
-    else if (m.status === 'in_save') { badgeText = '已写入存档'; }
-    else if (m.status === 'claimed') { badgeText = '已领取'; }
-    const badge = '<span class="badge ' + badgeClass + '">' + esc(badgeText) + '</span>';
-    return '<tr><td><code>' + esc(m.id) + '</code></td><td>' + (m.area || area) + '</td><td>' + esc(m.desp) + '</td><td><code>' +
-      esc(JSON.stringify(m.items || {})) + '</code></td><td>' + badge + '</td><td>' +
-      esc(m.created_at_text || '-') + '</td><td>' +
-      (m.status === 'pending'
-        ? '<button class="btn btn-danger" data-acc="' + esc(acc) + '" data-area="' + area + '" data-id="' + esc(m.id) + '">删除</button>'
-        : '-') +
-      '</td></tr>';
+    return '<tr><td>' + esc(m.channel) + '</td><td><code>' + esc(m.acc) + '</code></td><td>' +
+      (m.area || 1) + '</td><td><code>' + esc(JSON.stringify(m.items || {})) +
+      '</code></td><td>' + esc(m.begin_at || '-') + '</td><td>' + esc(m.end_at || '-') +
+      '</td><td><button class="btn btn-danger" data-channel="' + esc(m.channel) +
+      '" data-acc="' + esc(m.acc) + '" data-area="' + (m.area || 1) + '">删除</button></td></tr>';
   }).join('');
-  tbody.querySelectorAll('button[data-id]').forEach(function(btn) {
+  tbody.querySelectorAll('button[data-acc]').forEach(function(btn) {
     btn.onclick = function() {
-      delMail(btn.getAttribute('data-acc'), Number(btn.getAttribute('data-area')), btn.getAttribute('data-id'));
+      delMail(btn.getAttribute('data-channel'), btn.getAttribute('data-acc'),
+        Number(btn.getAttribute('data-area')));
     };
   });
 }
 
 async function sendMail() {
+  const channel = document.getElementById('mailChannel').value.trim();
   const acc = document.getElementById('mailAcc').value.trim();
   const area = Number(document.getElementById('mailArea').value) || 0;
-  const desp = document.getElementById('mailDesp').value.trim() || '系统奖励';
   const itemsText = document.getElementById('mailItems').value.trim();
+  if (!channel || channel.indexOf(':') >= 0) {
+    showMsg('请输入有效渠道，且不能包含冒号');
+    return;
+  }
   if (!acc) {
     showMsg('请输入账号');
     return;
@@ -406,92 +512,133 @@ async function sendMail() {
   const res = await api('/admin/api/mail', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ acc: acc, area: area, desp: desp, items: items })
+    body: JSON.stringify({ channel: channel, acc: acc, area: area, items: items })
   });
-  const data = await res.json();
-  showMsg('邮件已创建: ' + data.id + '（区服 ' + area + '）');
-  document.getElementById('mailQueryAcc').value = acc;
-  document.getElementById('mailQueryArea').value = area;
+  await res.json();
+  showMsg('邮件已写入，2 小时内有效（渠道 ' + channel + ' / 区服 ' + area + '）');
+  document.getElementById('mailQueryChannel').value = channel;
   loadMails();
 }
 
-async function delMail(acc, area, id) {
-  if (!confirm('删除待发邮件 ' + id + '（区服 ' + area + '）？')) return;
-  await api('/admin/api/mail?acc=' + encodeURIComponent(acc) + '&area=' + area + '&id=' + encodeURIComponent(id), { method: 'DELETE' });
+async function delMail(channel, acc, area) {
+  if (!confirm('删除 ' + acc + '（渠道 ' + channel + ' / 区服 ' + area + '）的邮件？')) return;
+  await api('/admin/api/mail?channel=' + encodeURIComponent(channel) + '&acc=' +
+    encodeURIComponent(acc) + '&area=' + area, { method: 'DELETE' });
   showMsg('邮件已删除');
   loadMails();
 }
 
-function parseBroadcastItems() {
-  let items;
-  try {
-    items = JSON.parse(document.getElementById('broadcastItems').value.trim());
-  } catch (e) {
-    throw new Error('群发物品 JSON 格式错误');
+function globalMailChannel() {
+  const channel = document.getElementById('globalMailChannel').value.trim();
+  if (!channel || channel.indexOf(':') >= 0) {
+    throw new Error('请输入有效渠道，且不能包含冒号');
   }
+  return channel;
+}
+
+function globalMailItems() {
+  const items = JSON.parse(document.getElementById('globalMailItems').value.trim());
   if (!items || typeof items !== 'object' || Array.isArray(items) || !Object.keys(items).length) {
-    throw new Error('群发物品必须是非空 JSON 对象');
+    throw new Error('物品必须是非空 JSON 对象');
   }
   return items;
 }
 
-async function createBroadcast(schedule) {
+async function sendGlobalMail() {
   try {
-    const items = parseBroadcastItems();
-    const desp = document.getElementById('broadcastDesp').value.trim() || '全服奖励';
-    let scheduledAt = Math.floor(Date.now() / 1000);
-    if (schedule) {
-      const value = document.getElementById('broadcastTime').value;
-      if (!value) throw new Error('请选择发送时间');
-      scheduledAt = Math.floor(new Date(value).getTime() / 1000);
-      if (!Number.isFinite(scheduledAt) || scheduledAt <= Math.floor(Date.now() / 1000)) {
-        throw new Error('发送时间必须晚于当前时间');
-      }
-    } else if (!confirm('确认立即向所有云存档发送奖励？')) {
-      return;
-    }
-    const res = await api('/admin/api/broadcasts', {
+    const channel = globalMailChannel();
+    const items = globalMailItems();
+    if (!confirm('确认向渠道 ' + channel + ' 的所有账号和区服发送奖励？')) return;
+    await api('/admin/api/global-mail', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ desp: desp, items: items, scheduled_at: scheduledAt })
+      body: JSON.stringify({ channel: channel, items: items })
     });
-    const data = await res.json();
-    showMsg((schedule ? '定时任务已创建: ' : '群发任务已创建: ') + data.id);
-    loadBroadcasts();
+    showMsg('全体邮件已发送，2 小时内有效');
+    loadGlobalMail();
   } catch (e) {
     showMsg(e.message || String(e));
   }
 }
 
-async function loadBroadcasts() {
-  const res = await api('/admin/api/broadcasts');
-  const data = await res.json();
-  const tbody = document.getElementById('broadcastsBody');
-  const jobs = data.items || [];
-  if (!jobs.length) {
-    tbody.innerHTML = '<tr><td colspan="7">暂无群发任务</td></tr>';
-    return;
+async function scheduleGlobalMail() {
+  try {
+    const channel = globalMailChannel();
+    const items = globalMailItems();
+    const value = document.getElementById('globalMailTime').value;
+    if (!value) throw new Error('请选择定时发送时间');
+    const scheduledAt = Math.floor(new Date(value).getTime() / 1000);
+    if (!Number.isFinite(scheduledAt) || scheduledAt <= Math.floor(Date.now() / 1000)) {
+      throw new Error('定时发送时间必须晚于当前时间');
+    }
+    const res = await api('/admin/api/global-mail/schedules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel: channel, items: items, scheduled_at: scheduledAt })
+    });
+    const data = await res.json();
+    showMsg('定时任务已创建：' + data.id);
+    loadGlobalMailSchedules();
+  } catch (e) {
+    showMsg(e.message || String(e));
   }
-  const names = { scheduled: '等待发送', running: '发送中', completed: '已完成', cancelled: '已取消' };
-  tbody.innerHTML = jobs.map(function(job) {
-    const pending = job.status === 'scheduled';
-    const statusClass = pending ? 'badge-pending' : 'badge-delivered';
-    return '<tr><td><code>' + esc(job.id) + '</code></td><td>' + esc(job.desp) + '</td><td><code>' +
-      esc(JSON.stringify(job.items || {})) + '</code></td><td>' + esc(job.scheduled_at_text || '-') +
-      '</td><td><span class="badge ' + statusClass + '">' + esc(names[job.status] || job.status) +
-      '</span></td><td>' + (job.sent_count || 0) + ' / ' + (job.recipient_count || 0) + '</td><td>' +
-      (pending ? '<button class="btn btn-danger" data-broadcast-id="' + esc(job.id) + '">取消</button>' : '-') +
-      '</td></tr>';
-  }).join('');
-  tbody.querySelectorAll('button[data-broadcast-id]').forEach(function(btn) {
-    btn.onclick = async function() {
-      const id = btn.getAttribute('data-broadcast-id');
-      if (!confirm('取消定时群发任务 ' + id + '？')) return;
-      await api('/admin/api/broadcasts?id=' + encodeURIComponent(id), { method: 'DELETE' });
-      showMsg('定时任务已取消');
-      loadBroadcasts();
-    };
-  });
+}
+
+async function loadGlobalMail() {
+  try {
+    const channel = globalMailChannel();
+    const res = await api('/admin/api/global-mail?channel=' + encodeURIComponent(channel));
+    const data = await res.json();
+    document.getElementById('globalMailStatus').textContent = data.active
+      ? '生效中：' + JSON.stringify(data.items || {}) + '，' + data.begin_at + ' 至 ' + data.end_at
+      : '当前没有有效的全体邮件';
+    loadGlobalMailSchedules();
+  } catch (e) {
+    showMsg(e.message || String(e));
+  }
+}
+
+async function loadGlobalMailSchedules() {
+  try {
+    const channel = globalMailChannel();
+    const res = await api('/admin/api/global-mail/schedules?channel=' + encodeURIComponent(channel));
+    const data = await res.json();
+    const items = data.items || [];
+    const tbody = document.getElementById('globalMailSchedulesBody');
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="5">暂无定时任务</td></tr>';
+      return;
+    }
+    tbody.innerHTML = items.map(function(item) {
+      return '<tr><td><code>' + esc(item.id) + '</code></td><td>' + esc(item.channel) +
+        '</td><td><code>' + esc(JSON.stringify(item.items || {})) + '</code></td><td>' +
+        esc(item.scheduled_at_text || '-') + '</td><td><button class="btn btn-danger" data-global-schedule-id="' +
+        esc(item.id) + '">取消</button></td></tr>';
+    }).join('');
+    tbody.querySelectorAll('button[data-global-schedule-id]').forEach(function(btn) {
+      btn.onclick = async function() {
+        const id = btn.getAttribute('data-global-schedule-id');
+        if (!confirm('取消定时任务 ' + id + '？')) return;
+        await api('/admin/api/global-mail/schedules?id=' + encodeURIComponent(id), { method: 'DELETE' });
+        showMsg('定时任务已取消');
+        loadGlobalMailSchedules();
+      };
+    });
+  } catch (e) {
+    showMsg(e.message || String(e));
+  }
+}
+
+async function deleteGlobalMail() {
+  try {
+    const channel = globalMailChannel();
+    if (!confirm('删除渠道 ' + channel + ' 当前的全体邮件？')) return;
+    await api('/admin/api/global-mail?channel=' + encodeURIComponent(channel), { method: 'DELETE' });
+    showMsg('全体邮件已删除');
+    loadGlobalMail();
+  } catch (e) {
+    showMsg(e.message || String(e));
+  }
 }
 
 async function loadUpdate() {
@@ -840,11 +987,13 @@ document.querySelectorAll('.tab').forEach(function(btn) {
 document.getElementById('btnRefreshAccounts').onclick = loadAccounts;
 document.getElementById('accountFilter').oninput = filterAccounts;
 document.getElementById('btnRefreshSaves').onclick = loadSaves;
+document.getElementById('saveFilter').oninput = filterSaves;
 document.getElementById('btnRefreshMails').onclick = loadMails;
 document.getElementById('btnSendMail').onclick = sendMail;
-document.getElementById('btnBroadcastNow').onclick = function() { createBroadcast(false); };
-document.getElementById('btnBroadcastSchedule').onclick = function() { createBroadcast(true); };
-document.getElementById('btnRefreshBroadcasts').onclick = loadBroadcasts;
+document.getElementById('btnSendGlobalMail').onclick = sendGlobalMail;
+document.getElementById('btnScheduleGlobalMail').onclick = scheduleGlobalMail;
+document.getElementById('btnRefreshGlobalMail').onclick = loadGlobalMail;
+document.getElementById('btnDeleteGlobalMail').onclick = deleteGlobalMail;
 document.getElementById('btnSaveUpdate').onclick = saveUpdate;
 document.getElementById('btnRefreshUpdate').onclick = loadUpdate;
 document.getElementById('btnLoadUpdateJson').onclick = loadUpdateJsonFile;
@@ -856,7 +1005,6 @@ document.getElementById('btnCloseModal').onclick = closeModal;
 loadStats();
 loadAccounts();
 loadSaves();
-loadBroadcasts();
 loadUpdate();
 </script>
 </body>

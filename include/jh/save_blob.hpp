@@ -1,7 +1,5 @@
 #pragma once
 
-#include "jh/mail.hpp"
-
 #include <optional>
 #include <string>
 #include <vector>
@@ -19,10 +17,10 @@ std::string pack(const std::vector<SaveSegment>& segments);
 std::optional<std::string> get_segment(const std::string& blob, const std::string& name);
 std::string set_segment(const std::string& blob, const std::string& name, const std::string& content);
 
-// 将待发邮件写入 dat.json.myGift，供客户端邮箱 UI 领取（原版 recvMail 流程）
-std::string inject_mygift(const std::string& blob, int save_index, const std::vector<mail::MailRecord>& mails);
-
 // 删除 dat.json 的 bl 字段。客户端 JhPerson::getPower 在 isBl() 为真时把怪物伤害乘以 10000
 std::string strip_bl(const std::string& blob, int save_index);
+
+// 写入 dat.json 的 bl=1，使客户端 isBl() 为真并触发 10000 倍伤害镇压
+std::string apply_bl(const std::string& blob, int save_index);
 
 }  // namespace jh::save_blob

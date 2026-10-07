@@ -1,5 +1,6 @@
 #include "jh/session.hpp"
 
+#include "jh/cache.hpp"
 #include "jh/crypto.hpp"
 #include "jh/db.hpp"
 
@@ -12,6 +13,7 @@ namespace jh {
 namespace {
 
 constexpr int64_t kSessionTtlSeconds = 30LL * 24 * 60 * 60;
+TtlCache<std::string, std::string> g_session_cache(200000);
 
 int64_t now_sec() {
   return std::chrono::duration_cast<std::chrono::seconds>(
@@ -56,7 +58,9 @@ std::optional<IssuedSession> session_issue(const std::string& acc) {
     IssuedSession issued;
     issued.token = random_token();
     issued.expires_at = now_sec() + kSessionTtlSeconds;
-    if (db_insert_session(acc, crypto::md5_hex(issued.token), issued.expires_at)) {
+    const std::string token_hash = crypto::md5_hex(issued.token);
+    if (db_insert_session(acc, token_hash, issued.expires_at)) {
+      g_session_cache.put(token_hash, acc, std::chrono::seconds(kSessionTtlSeconds));
       return issued;
     }
   }
@@ -67,15 +71,25 @@ std::optional<std::string> session_validate(const std::string& token) {
   if (!is_token_format(token)) {
     return std::nullopt;
   }
-  const auto session = db_find_session(crypto::md5_hex(token));
+  const std::string token_hash = crypto::md5_hex(token);
+  if (const auto cached = g_session_cache.get(token_hash)) {
+    return cached;
+  }
+  const auto session = db_find_session(token_hash);
   if (!session) {
     return std::nullopt;
   }
+  const int64_t remaining = session->expires_at - now_sec();
+  if (remaining <= 0) {
+    return std::nullopt;
+  }
+  g_session_cache.put(token_hash, session->acc, std::chrono::seconds(remaining));
   return session->acc;
 }
 
 void session_revoke_account(const std::string& acc) {
   db_revoke_sessions(acc);
+  g_session_cache.clear();
 }
 
 }  // namespace jh

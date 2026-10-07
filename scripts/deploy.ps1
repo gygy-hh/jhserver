@@ -1,9 +1,9 @@
-# Build in WSL, upload to the Singapore host, restart jh-server.
+# Build in WSL, upload to the production host, restart jh-server.
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1
 #        powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -SkipBuild
 param(
-    [string]$HostName = "8.219.65.240",
-    [string]$User = "admin",
+    [string]$HostName = "39.107.52.206",
+    [string]$User = "root",
     [string]$RemoteDir = "/opt/jh-server",
     [switch]$SkipBuild
 )
@@ -24,13 +24,13 @@ if (-not (Test-Path $exe)) { throw "binary not found: $exe" }
 $remote = "${User}@${HostName}"
 Write-Host "Upload to ${remote}:${RemoteDir}"
 
-$prepCmd = "sudo systemctl stop jh-server; sudo mkdir -p ${RemoteDir}/build ${RemoteDir}/web ${RemoteDir}/data ${RemoteDir}/scripts ${RemoteDir}/deploy; sudo chown -R ${User}:${User} ${RemoteDir}"
+$prepCmd = "sudo systemctl stop jh-server; sudo install -d -o root -g jh-server -m 755 ${RemoteDir}/build ${RemoteDir}/web ${RemoteDir}/scripts ${RemoteDir}/deploy; sudo install -d -o jh-server -g jh-server -m 750 ${RemoteDir}/data"
 ssh $remote $prepCmd
 if ($LASTEXITCODE -ne 0) { throw "SSH failed. Check key in ~/.ssh/authorized_keys on the server." }
 
 scp $exe "${remote}:/tmp/jh_server"
 if ($LASTEXITCODE -ne 0) { throw "scp binary failed" }
-ssh $remote "sudo mv /tmp/jh_server ${RemoteDir}/build/jh_server; sudo chmod +x ${RemoteDir}/build/jh_server; sudo chown ${User}:${User} ${RemoteDir}/build/jh_server"
+ssh $remote "sudo mv /tmp/jh_server ${RemoteDir}/build/jh_server; sudo chmod 755 ${RemoteDir}/build/jh_server; sudo chown root:jh-server ${RemoteDir}/build/jh_server"
 if ($LASTEXITCODE -ne 0) { throw "install binary failed" }
 
 scp (Join-Path $root "config.prod.json") "${remote}:${RemoteDir}/config.json"
@@ -40,18 +40,15 @@ scp (Join-Path $root "deploy\jh-server.service") "${remote}:${RemoteDir}/deploy/
 if (Test-Path (Join-Path $root "data\save_keys.json")) {
     scp (Join-Path $root "data\save_keys.json") "${remote}:${RemoteDir}/data/save_keys.json"
 }
-if (Test-Path (Join-Path $root "data\updates")) {
-    scp -r (Join-Path $root "data\updates") "${remote}:${RemoteDir}/data/"
-}
 
 Write-Host "Restart remote service..."
-$remoteCmd = "sudo cp ${RemoteDir}/deploy/jh-server.service /etc/systemd/system/jh-server.service; sudo systemctl daemon-reload; sudo systemctl enable jh-server; sudo systemctl restart jh-server; sleep 1; sudo systemctl --no-pager --full status jh-server; curl -sS http://127.0.0.1:18080/health; echo"
+$remoteCmd = "sudo chown root:jh-server ${RemoteDir}/config.json ${RemoteDir}/web/admin.html; sudo chmod 640 ${RemoteDir}/config.json; sudo chmod 644 ${RemoteDir}/web/admin.html; sudo chown -R jh-server:jh-server ${RemoteDir}/data; sudo cp ${RemoteDir}/deploy/jh-server.service /etc/systemd/system/jh-server.service; sudo systemctl daemon-reload; sudo systemctl enable jh-server; sudo systemctl restart jh-server; sleep 1; sudo systemctl --no-pager --full status jh-server; curl -sS http://127.0.0.1:18080/health; echo"
 ssh $remote $remoteCmd
 if ($LASTEXITCODE -ne 0) { throw "remote restart failed" }
 
 Write-Host ""
 Write-Host "Done."
 Write-Host "  health: http://${HostName}:18080/health"
-Write-Host "  admin:  http://gaoy.fun:18080/admin"
-Write-Host "  g_url:  http://gaoy.fun:18080/"
+Write-Host "  admin:  http://${HostName}:18080/admin"
+Write-Host "  g_url:  http://${HostName}:18080/"
 Write-Host "If MySQL error, create db in BT panel then run init_db.sql on the server."

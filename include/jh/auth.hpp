@@ -34,6 +34,8 @@ AuthOutcome auth_login_mail(const std::string& acc, const std::string& psw);
 
 bool auth_set_password(const std::string& acc, const std::string& new_psw, std::string& error);
 bool auth_reset_password(const std::string& acc, const std::string& new_psw, std::string& error);
+bool auth_change_password(const std::string& acc, const std::string& old_psw,
+                          const std::string& new_psw, std::string& error);
 
 std::string auth_result_message(AuthResult result);
 

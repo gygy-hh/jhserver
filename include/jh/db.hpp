@@ -15,6 +15,7 @@ struct DbAccount {
   std::string psw_salt;
   std::string psw_hash;
   int64_t created_at = 0;
+  bool bl_exempt = false;
 
   bool has_password() const { return !psw_hash.empty(); }
 };
@@ -32,6 +33,7 @@ std::optional<DbAccount> db_find_account(const std::string& acc);
 std::optional<DbAccount> db_create_account(const std::string& acc, const std::string& salt, const std::string& hash);
 DbAccount db_ensure_account(const std::string& acc);
 bool db_set_password(const std::string& acc, const std::string& salt, const std::string& hash);
+bool db_set_bl_exempt(const std::string& acc, bool exempt);
 bool db_delete_account(const std::string& acc);
 std::vector<DbAccount> db_list_accounts();
 size_t db_account_count();

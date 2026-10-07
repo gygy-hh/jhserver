@@ -1,12 +1,15 @@
-#include "jh/mail.hpp"
 #include "jh/storage.hpp"
 
+#include "jh/cache.hpp"
 #include "jh/db.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
 
@@ -18,6 +21,8 @@ namespace {
 
 std::mutex g_mu;
 std::string g_data_dir;
+TtlCache<std::string, AccountAuthInfo> g_account_cache(100000);
+constexpr auto kAccountCacheTtl = std::chrono::minutes(10);
 
 std::string save_path(const std::string& acc, int area) {
   std::string safe = acc;
@@ -47,6 +52,7 @@ AccountAuthInfo to_auth_info(const DbAccount& db_acc) {
   info.psw_hash = db_acc.psw_hash;
   info.created_at = db_acc.created_at;
   info.has_password = db_acc.has_password();
+  info.bl_exempt = db_acc.bl_exempt;
   return info;
 }
 
@@ -54,24 +60,38 @@ AccountAuthInfo to_auth_info(const DbAccount& db_acc) {
 
 void init(const std::string& data_dir) {
   g_data_dir = data_dir;
+  g_account_cache.clear();
   fs::create_directories(data_dir + "/saves");
 }
 
 AccountRecord ensure_account(const std::string& acc) {
+  if (const auto cached = g_account_cache.get(acc)) {
+    return {cached->id, cached->acc};
+  }
   const DbAccount db_acc = db_ensure_account(acc);
+  g_account_cache.put(acc, to_auth_info(db_acc), kAccountCacheTtl);
   return {db_acc.id, db_acc.acc};
 }
 
 std::optional<AccountRecord> find_account(const std::string& acc) {
+  if (const auto cached = g_account_cache.get(acc)) {
+    return AccountRecord{cached->id, cached->acc};
+  }
   if (auto db_acc = db_find_account(acc)) {
+    g_account_cache.put(acc, to_auth_info(*db_acc), kAccountCacheTtl);
     return AccountRecord{db_acc->id, db_acc->acc};
   }
   return std::nullopt;
 }
 
 std::optional<AccountAuthInfo> get_account_auth(const std::string& acc) {
+  if (const auto cached = g_account_cache.get(acc)) {
+    return cached;
+  }
   if (auto db_acc = db_find_account(acc)) {
-    return to_auth_info(*db_acc);
+    auto info = to_auth_info(*db_acc);
+    g_account_cache.put(acc, info, kAccountCacheTtl);
+    return info;
   }
   return std::nullopt;
 }
@@ -79,13 +99,33 @@ std::optional<AccountAuthInfo> get_account_auth(const std::string& acc) {
 std::optional<AccountRecord> create_account_with_password(const std::string& acc, const std::string& salt,
                                                           const std::string& hash) {
   if (auto db_acc = db_create_account(acc, salt, hash)) {
+    g_account_cache.put(acc, to_auth_info(*db_acc), kAccountCacheTtl);
     return AccountRecord{db_acc->id, db_acc->acc};
   }
   return std::nullopt;
 }
 
 bool set_account_password(const std::string& acc, const std::string& salt, const std::string& hash) {
-  return db_set_password(acc, salt, hash);
+  const bool changed = db_set_password(acc, salt, hash);
+  if (changed) {
+    g_account_cache.erase(acc);
+  }
+  return changed;
+}
+
+bool is_bl_exempt(const std::string& acc) {
+  if (auto info = get_account_auth(acc)) {
+    return info->bl_exempt;
+  }
+  return false;
+}
+
+bool set_bl_exempt(const std::string& acc, bool exempt) {
+  const bool changed = db_set_bl_exempt(acc, exempt);
+  if (changed) {
+    g_account_cache.erase(acc);
+  }
+  return changed;
 }
 
 bool save_cloud(const std::string& acc, int area, const std::string& save_json, const SaveMeta& meta) {
@@ -169,6 +209,30 @@ bool mark_manual_download(const std::string& acc, int area, int64_t at) {
   return static_cast<bool>(out);
 }
 
+bool clear_manual_download(const std::string& acc, int area) {
+  std::lock_guard<std::mutex> lock(g_mu);
+  const std::string path = save_path(acc, area);
+  std::ifstream in(path);
+  if (!in) {
+    return false;
+  }
+  nlohmann::json j;
+  try {
+    in >> j;
+  } catch (...) {
+    return false;
+  }
+  in.close();
+  j["manual_download_at"] = 0;
+  std::ofstream out(path, std::ios::trunc);
+  if (!out) {
+    return false;
+  }
+  out << j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+  out.flush();
+  return static_cast<bool>(out);
+}
+
 std::optional<std::string> load_cloud(const std::string& acc, int area) {
   std::lock_guard<std::mutex> lock(g_mu);
   {
@@ -216,11 +280,17 @@ std::vector<AccountAuthInfo> list_accounts_auth() {
 
 std::vector<SaveRecord> list_saves() {
   std::lock_guard<std::mutex> lock(g_mu);
-  std::vector<SaveRecord> out;
   const fs::path saves_dir = fs::path(g_data_dir) / "saves";
   if (!fs::exists(saves_dir)) {
-    return out;
+    return {};
   }
+
+  struct Aggregate {
+    SaveRecord record;
+    bool has_sav_file = false;
+  };
+  std::map<std::pair<std::string, int>, Aggregate> grouped;
+
   for (const auto& entry : fs::directory_iterator(saves_dir)) {
     if (!entry.is_regular_file()) {
       continue;
@@ -231,26 +301,69 @@ std::vector<SaveRecord> list_saves() {
     if (us == std::string::npos || dot == std::string::npos || us >= dot) {
       continue;
     }
-    SaveRecord rec;
-    rec.acc = filename.substr(0, us);
+    const std::string extension = filename.substr(dot);
+    if (extension != ".sav" && extension != ".json") {
+      continue;
+    }
+    const std::string acc = filename.substr(0, us);
+    int area = 0;
     try {
-      rec.area = std::stoi(filename.substr(us + 1, dot - us - 1));
+      area = std::stoi(filename.substr(us + 1, dot - us - 1));
     } catch (...) {
       continue;
     }
-    rec.size = static_cast<size_t>(entry.file_size());
-    rec.updated_at = 0;
+
+    auto& aggregate = grouped[{acc, area}];
+    SaveRecord& rec = aggregate.record;
+    rec.acc = acc;
+    rec.area = area;
+
+    if (extension == ".sav") {
+      aggregate.has_sav_file = true;
+      rec.has_blob = true;
+      rec.size = static_cast<size_t>(entry.file_size());
+      continue;
+    }
+
+    rec.has_meta = true;
     try {
       std::ifstream in(entry.path());
       nlohmann::json j;
       in >> j;
-      if (j.contains("updated_at")) {
-        rec.updated_at = j["updated_at"].get<int64_t>();
+      rec.username = j.value("username", rec.username);
+      rec.lev = j.value("lev", rec.lev);
+      rec.updated_at = j.value("updated_at", rec.updated_at);
+
+      // 兼容早期把存档正文直接放在 .json 的格式；新格式正文位于同名 .sav。
+      if (j.contains("save")) {
+        rec.has_blob = true;
+        if (!aggregate.has_sav_file) {
+          rec.size = j["save"].is_string() ? j["save"].get_ref<const std::string&>().size()
+                                           : j["save"].dump().size();
+        }
       }
     } catch (...) {
     }
-    out.push_back(std::move(rec));
   }
+
+  std::vector<SaveRecord> out;
+  out.reserve(grouped.size());
+  for (auto& [key, aggregate] : grouped) {
+    (void)key;
+    if (aggregate.record.username.empty()) {
+      aggregate.record.username = aggregate.record.acc;
+    }
+    out.push_back(std::move(aggregate.record));
+  }
+  std::stable_sort(out.begin(), out.end(), [](const SaveRecord& a, const SaveRecord& b) {
+    if (a.updated_at != b.updated_at) {
+      return a.updated_at > b.updated_at;
+    }
+    if (a.acc != b.acc) {
+      return a.acc < b.acc;
+    }
+    return a.area < b.area;
+  });
   return out;
 }
 
@@ -265,6 +378,7 @@ bool delete_account(const std::string& acc) {
   if (!db_delete_account(acc)) {
     return false;
   }
+  g_account_cache.erase(acc);
 
   const fs::path saves_dir = fs::path(g_data_dir) / "saves";
   const std::string prefix = save_path(acc, 0);
@@ -278,7 +392,6 @@ bool delete_account(const std::string& acc) {
       }
     }
   }
-  mail::remove_account(acc);
   return true;
 }
 
@@ -286,14 +399,7 @@ ServerStats get_stats() {
   ServerStats stats;
   stats.account_count = db_account_count();
   stats.next_id = db_next_id_hint();
-  const fs::path saves_dir = fs::path(g_data_dir) / "saves";
-  if (fs::exists(saves_dir)) {
-    for (const auto& entry : fs::directory_iterator(saves_dir)) {
-      if (entry.is_regular_file()) {
-        ++stats.save_count;
-      }
-    }
-  }
+  stats.save_count = list_saves().size();
   return stats;
 }
 

@@ -57,14 +57,6 @@ std::vector<std::string> to_parts(const std::vector<SaveSegment>& segments) {
   return parts;
 }
 
-json build_mygift_entry(const mail::MailRecord& mail) {
-  json entry{{"desp", mail.desp}};
-  for (const auto& [prop_id, count] : mail.items) {
-    entry[prop_id] = count;
-  }
-  return entry;
-}
-
 // 解密 dat.json、交给 edit 修改、按原密钥重新加密。edit 返回 false 表示无改动。
 std::string edit_dat(const std::string& blob, int save_index, const std::function<bool(json&)>& edit) {
   auto dat_cipher = get_segment(blob, "dat.json");
@@ -133,23 +125,18 @@ std::string set_segment(const std::string& blob, const std::string& name, const 
   return pack(segments);
 }
 
-std::string inject_mygift(const std::string& blob, int save_index, const std::vector<mail::MailRecord>& mails) {
-  if (mails.empty()) {
-    return blob;
-  }
-  return edit_dat(blob, save_index, [&mails](json& doc) {
-    if (!doc.contains("myGift") || !doc["myGift"].is_object()) {
-      doc["myGift"] = json::object();
-    }
-    for (const auto& mail : mails) {
-      doc["myGift"][mail.id] = build_mygift_entry(mail);
-    }
-    return true;
-  });
-}
-
 std::string strip_bl(const std::string& blob, int save_index) {
   return edit_dat(blob, save_index, [](json& doc) { return doc.is_object() && doc.erase("bl") > 0; });
+}
+
+std::string apply_bl(const std::string& blob, int save_index) {
+  return edit_dat(blob, save_index, [](json& doc) {
+    if (!doc.is_object() || doc.contains("bl")) {
+      return false;
+    }
+    doc["bl"] = 1;
+    return true;
+  });
 }
 
 }  // namespace jh::save_blob

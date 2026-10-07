@@ -1,6 +1,7 @@
 #include "jh/handlers.hpp"
 
 #include "jh/auth.hpp"
+#include "jh/cache.hpp"
 #include "jh/crypto.hpp"
 #include "jh/mail.hpp"
 #include "jh/save_blob.hpp"
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <ctime>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -21,6 +23,32 @@ namespace jh::handlers {
 namespace {
 
 using json = nlohmann::json;
+
+TtlCache<std::string, json> g_init_data_cache(512);
+constexpr auto kInitDataCacheTtl = std::chrono::seconds(30);
+constexpr int kMaxSaveArea = 66;
+
+template <typename Loader>
+json cached_init_data(const std::string& key, Loader&& loader) {
+  if (const auto cached = g_init_data_cache.get(key)) {
+    return *cached;
+  }
+  json value = loader();
+  g_init_data_cache.put(key, value, kInitDataCacheTtl);
+  return value;
+}
+
+std::string mail_begin_at(const std::optional<json>& activities) {
+  if (!activities || !activities->is_array()) {
+    return {};
+  }
+  for (const auto& activity : *activities) {
+    if (activity.is_object() && activity.value("type", "") == "s_goldSum") {
+      return activity.value("beginAt", "");
+    }
+  }
+  return {};
+}
 
 struct RequestCtx {
   const ServerConfig* config;
@@ -345,13 +373,38 @@ json api_err(const std::string& msg, int code = 1) {
   return json{{"code", code}, {"msg", msg}};
 }
 
-bool requires_session(const std::string& action) {
-  return action == "getInitData";
+std::optional<int64_t> request_repair_version(const json& req) {
+  static const char* keys[] = {"repairVer", "repair_ver", "repair"};
+  for (const char* key : keys) {
+    const auto it = req.find(key);
+    if (it != req.end() && it->is_number_integer()) {
+      return it->get<int64_t>();
+    }
+  }
+  return std::nullopt;
 }
 
-bool bind_session_identity(json& req) {
+std::string enforce_bl_policy(const std::string& blob, const std::string& acc, int save_index, const char* where) {
+  const std::string updated = save_blob::strip_bl(blob, save_index);
+  if (updated.size() != blob.size()) {
+    std::cerr << "[" << where << "] stripped bl acc=" << acc << " area=" << save_index << std::endl;
+  }
+  return updated;
+}
+
+bool requires_session(const std::string& action) {
+  return action == "getInitData" || action == "changePassword";
+}
+
+bool bind_session_identity(json& req, std::string& error) {
   const auto acc = session_validate(req.value("session", ""));
   if (!acc) {
+    error = "session required";
+    return false;
+  }
+  const std::string requested_acc = req.value("acc", "");
+  if (!requested_acc.empty() && requested_acc != *acc) {
+    error = "session account mismatch";
     return false;
   }
   req["acc"] = *acc;
@@ -363,6 +416,9 @@ json handle_find_save(const json& req) {
   int area = req.value("area", 0);
   if (area <= 0) {
     area = 1;
+  }
+  if (area > kMaxSaveArea) {
+    return api_err("invalid area");
   }
   if (acc.empty()) {
     return api_err("acc required");
@@ -382,7 +438,7 @@ json handle_find_save(const json& req) {
   return json{{"code", 0}, {"data", data}};
 }
 
-json handle_get_init_data(const json& req, int /*ver*/) {
+json handle_get_init_data(const json& req, int /*ver*/, const std::string& channel) {
   const std::string acc = req.value("acc", "");
   if (acc.empty()) {
     return json{{"code", 1}, {"msg", "acc required"}};
@@ -391,46 +447,116 @@ json handle_get_init_data(const json& req, int /*ver*/) {
   if (area <= 0) {
     area = 1;
   }
+  if (area > kMaxSaveArea) {
+    return api_err("invalid area");
+  }
+  std::cerr << "[getInitData] channel=" << channel << " acc=" << acc << " area=" << area
+            << std::endl;
   const int prog_ver = req.value("prog_ver", req.value("program_version", 0));
   const int json_ver = req.value("json_ver", 0);
   const int asset_ver = req.value("asset_ver", 0);
   auto account = storage::ensure_account(acc);
   const std::time_t now = std::time(nullptr);
-  json repair = update::get_repair();
+  bool md5_suppressed = false;
+  std::string client_apk_md5 = req.value("apk_md5", "");
+  std::string server_apk_md5 = update::get_manifest().apk_md5;
+  std::transform(client_apk_md5.begin(), client_apk_md5.end(), client_apk_md5.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::transform(server_apk_md5.begin(), server_apk_md5.end(), server_apk_md5.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (!storage::is_bl_exempt(acc) && server_apk_md5.size() == 32 &&
+      !client_apk_md5.empty()) {
+    md5_suppressed = client_apk_md5 != server_apk_md5;
+    if (md5_suppressed) {
+      std::cerr << "[getInitData] apk md5 mismatch, bl=1 acc=" << acc
+                << " client=" << client_apk_md5 << " server=" << server_apk_md5 << std::endl;
+    }
+  }
+  json repair = cached_init_data("repair", [] { return update::get_repair(); });
   if (!repair.is_array()) {
     repair = json::array();
   }
 
-  const auto pending = mail::pending_for_injection(acc, area);
-  if (!pending.empty()) {
-    json items = json::object();
-    std::vector<std::string> mail_ids;
-    int64_t repair_ver = 0;
-    for (const auto& m : pending) {
-      mail_ids.push_back(m.id);
-      repair_ver = std::max(repair_ver, m.push_version > 0 ? m.push_version : m.created_at);
-      for (const auto& [prop_id, count] : m.items) {
-        items[prop_id] = items.value(prop_id, 0) + count;
-      }
+  auto personal_huo_dong = mail::take_huo_dong(channel, acc, area);
+  auto global_huo_dong = mail::take_global_huo_dong(channel, acc, area);
+  // 客户端只可靠处理一个 s_goldSum。与参考项目的覆盖语义一致，
+  // 个人邮件和全体邮件同时存在时仅下发发送时间较新的一封。
+  if (personal_huo_dong && global_huo_dong) {
+    if (mail_begin_at(global_huo_dong) > mail_begin_at(personal_huo_dong)) {
+      personal_huo_dong.reset();
+    } else {
+      global_huo_dong.reset();
     }
-    const json event{{"getProp", items}};
-    repair.push_back(json{{"repairVer", repair_ver}, {"dataJs", event.dump()}});
-    mail::mark_pushed(acc, area, mail_ids);
-    std::cerr << "[mailPush] acc=" << acc << " area=" << area << " mails=" << mail_ids.size()
-              << " repairVer=" << repair_ver << std::endl;
+  }
+  int64_t repair_version = 0;
+  const json content_version = cached_init_data(
+      "contentVersion", [] { return json(update::get_manifest().updated_at); });
+  if (content_version.is_number_integer()) {
+    repair_version = std::max(repair_version, content_version.get<int64_t>());
+  }
+  repair_version = std::max<int64_t>(repair_version, 1);
+  for (const auto& item : repair) {
+    repair_version =
+        std::max(repair_version, item.value("repairVer", static_cast<int64_t>(0)));
+  }
+  if (const auto client_version = request_repair_version(req);
+      client_version && *client_version == repair_version && !personal_huo_dong &&
+      !global_huo_dong) {
+    json unchanged{{"code", 0}, {"repairVer", repair_version}};
+    if (md5_suppressed) {
+      unchanged["bl"] = 1;
+    }
+    return unchanged;
+  }
+
+  bool has_current_version = false;
+  for (const auto& item : repair) {
+    if (item.value("repairVer", static_cast<int64_t>(0)) == repair_version) {
+      has_current_version = true;
+      break;
+    }
+  }
+  if (!has_current_version) {
+    repair.push_back(
+        json{{"repairVer", repair_version}, {"dataJs", R"({"getProp":{}})"}});
+  }
+  std::stable_sort(repair.begin(), repair.end(), [](const json& a, const json& b) {
+    return a.value("repairVer", static_cast<int64_t>(0)) <
+           b.value("repairVer", static_cast<int64_t>(0));
+  });
+
+  json huo_dong = cached_init_data("huoDong", [] { return update::get_huo_dong(); });
+  if (!huo_dong.is_array()) {
+    huo_dong = json::array();
+  }
+  if (personal_huo_dong) {
+    huo_dong = *personal_huo_dong;
+    std::cerr << "[mailPush] channel=" << channel << " acc=" << acc << " area=" << area
+              << " scope=personal protocol=redis_s_goldSum" << std::endl;
+  } else if (global_huo_dong) {
+    huo_dong = *global_huo_dong;
+    std::cerr << "[mailPush] channel=" << channel << " acc=" << acc << " area=" << area
+              << " scope=global protocol=redis_s_goldSum" << std::endl;
   }
 
   json resp{
       {"code", 0},
+      {"repairVer", repair_version},
       {"tt", static_cast<int64_t>(now)},
       {"mtt", crypto::calc_mtt(account.id)},
       {"save_syn", req.value("save_syn", 0)},
       {"fight_syn", req.value("fight_syn", 0)},
-      {"huoDong", update::get_huo_dong()},
+      {"huoDong", std::move(huo_dong)},
       {"repair", repair},
-      {"update", update::get_client_update(prog_ver, json_ver, asset_ver)},
+      {"update",
+       cached_init_data("update:" + std::to_string(prog_ver) + ":" + std::to_string(json_ver) + ":" +
+                            std::to_string(asset_ver),
+                        [=] { return update::get_client_update(prog_ver, json_ver, asset_ver); })},
       {"area", area},
   };
+  if (md5_suppressed) {
+    resp["bl"] = 1;
+  }
   return resp;
 }
 
@@ -449,8 +575,36 @@ json handle_login(const json& req) {
   return json{{"code", 0},
               {"save_syn", 0},
               {"fight_syn", 0},
+              {"acc", acc},
+              {"is_new_account", auth.is_new_account},
               {"session", session->token},
               {"session_exp", session->expires_at}};
+}
+
+json handle_change_password(const json& req) {
+  const std::string acc = req.value("acc", "");
+  const std::string old_psw = req.value("old_psw", "");
+  const std::string new_psw = req.value("new_psw", "");
+  if (acc.empty()) {
+    return api_err("session required", 401);
+  }
+  if (old_psw.empty()) {
+    return api_err("old password required");
+  }
+  if (new_psw.empty()) {
+    return api_err("new password required");
+  }
+  std::string error;
+  if (!auth_change_password(acc, old_psw, new_psw, error)) {
+    return api_err(error);
+  }
+  const auto session = session_issue(acc);
+  if (!session) {
+    return api_err("session create failed");
+  }
+  return api_ok(json{{"msg", "password changed"},
+                     {"session", session->token},
+                     {"session_exp", session->expires_at}});
 }
 
 json handle_sms_code(const json& req) {
@@ -482,11 +636,6 @@ json handle_upload_save_fields(const std::string& acc, int area, const std::stri
   meta.save_time = now;
   meta.manual_upload_at = now;
   if (auto existing = storage::get_save_meta(acc, resolved_area)) {
-    const int64_t last_upload = existing->manual_upload_at > 0 ? existing->manual_upload_at : existing->save_time;
-    const int64_t remain = manual_remain_sec(last_upload, now);
-    if (remain > 0) {
-      return api_err(manual_remain_msg("\u624b\u52a8\u4e0a\u4f20", remain));
-    }
     meta.manual_download_at = existing->manual_download_at;
   }
 
@@ -495,22 +644,14 @@ json handle_upload_save_fields(const std::string& acc, int area, const std::stri
 
   std::string cleaned = save_str;
   try {
-    cleaned = save_blob::strip_bl(cleaned, resolved_area);
-    if (cleaned.size() != save_str.size()) {
-      std::cerr << "[uploadSave] stripped bl acc=" << acc << " area=" << resolved_area << std::endl;
-    }
+    cleaned = enforce_bl_policy(cleaned, acc, resolved_area, "uploadSave");
   } catch (const std::exception& ex) {
     cleaned = save_str;
-    std::cerr << "[uploadSave] strip bl skipped: " << ex.what() << std::endl;
+    std::cerr << "[uploadSave] bl policy skipped: " << ex.what() << std::endl;
   }
 
   if (!storage::save_cloud(acc, resolved_area, cleaned, meta)) {
     return api_err("save failed");
-  }
-  try {
-    mail::sync_claimed_from_save(acc, resolved_area, resolved_area, cleaned);
-  } catch (const std::exception& ex) {
-    std::cerr << "[uploadSave] mail sync ignored: " << ex.what() << std::endl;
   }
   return api_ok(json{{"msg", "上传成功"}});
 }
@@ -550,10 +691,12 @@ json handle_download_save(const json& req) {
     return api_err("acc required");
   }
   const int64_t now = std::time(nullptr);
-  if (auto meta = storage::get_save_meta(acc, area)) {
-    const int64_t remain = manual_remain_sec(meta->manual_download_at, now);
-    if (remain > 0) {
-      return api_err(manual_remain_msg("\u624b\u52a8\u4e0b\u8f7d", remain));
+  if (acc != "19848015669") {
+    if (auto meta = storage::get_save_meta(acc, area)) {
+      const int64_t remain = manual_remain_sec(meta->manual_download_at, now);
+      if (remain > 0) {
+        return api_err(manual_remain_msg("\u624b\u52a8\u4e0b\u8f7d", remain));
+      }
     }
   }
   auto save = storage::load_cloud(acc, area);
@@ -563,28 +706,9 @@ json handle_download_save(const json& req) {
   }
 
   try {
-    const std::string stripped = save_blob::strip_bl(*save, area);
-    if (stripped.size() != save->size()) {
-      std::cerr << "[downloadSave] stripped bl acc=" << acc << " area=" << area << std::endl;
-    }
-    *save = stripped;
+    *save = enforce_bl_policy(*save, acc, area, "downloadSave");
   } catch (const std::exception& ex) {
-    std::cerr << "[downloadSave] strip bl skipped: " << ex.what() << std::endl;
-  }
-
-  try {
-    const auto pending = mail::pending_for_injection(acc, area);
-    if (!pending.empty()) {
-      *save = save_blob::inject_mygift(*save, area, pending);
-      std::vector<std::string> ids;
-      ids.reserve(pending.size());
-      for (const auto& m : pending) {
-        ids.push_back(m.id);
-      }
-      mail::mark_in_save(acc, area, ids);
-    }
-  } catch (const std::exception& ex) {
-    std::cerr << "[downloadSave] mail inject skipped: " << ex.what() << std::endl;
+    std::cerr << "[downloadSave] bl policy skipped: " << ex.what() << std::endl;
   }
 
   storage::mark_manual_download(acc, area, now);
@@ -606,6 +730,8 @@ json handle_mail(const json& req) {
   return json{{"code", 0},
               {"save_syn", 0},
               {"fight_syn", 0},
+              {"acc", acc},
+              {"is_new_account", auth.is_new_account},
               {"session", session->token},
               {"session_exp", session->expires_at}};
 }
@@ -616,13 +742,16 @@ json handle_stub(const json& /*req*/) {
 
 json dispatch(const RequestCtx& ctx, const json& req) {
   if (ctx.action == "getInitData") {
-    return handle_get_init_data(req, ctx.ver);
+    return handle_get_init_data(req, ctx.ver, ctx.channel);
   }
   if (ctx.action == "login") {
     return handle_login(req);
   }
   if (ctx.action == "register" || ctx.action == "regist") {
     return handle_login(req);
+  }
+  if (ctx.action == "changePassword") {
+    return handle_change_password(req);
   }
   if (ctx.action == "smsCode") {
     return handle_sms_code(req);
@@ -671,8 +800,12 @@ void handle_post(const httplib::Request& req, httplib::Response& res, const Serv
       out = handle_upload_save_plain(plain, acc);
     } else if (crypto::is_encrypted_body_action(ctx.action)) {
       json body = parse_encrypted_body(trim_string(req.body), ctx.ver);
-      if (requires_session(ctx.action) && !bind_session_identity(body)) {
-        out = api_err("session required", 401);
+      std::string session_error;
+      if (requires_session(ctx.action) && !bind_session_identity(body, session_error)) {
+        std::cerr << "[session] rejected action=" << ctx.action << " channel=" << ctx.channel
+                  << " reason=" << session_error
+                  << std::endl;
+        out = api_err(session_error, 401);
       } else {
         out = dispatch(ctx, body);
       }

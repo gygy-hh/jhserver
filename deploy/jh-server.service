@@ -1,6 +1,6 @@
 [Unit]
 Description=JH Game Server
-After=network.target mysqld.service mariadb.service
+After=network.target mysqld.service mariadb.service redis.service redis-server.service
 
 [Service]
 Type=simple

@@ -46,3 +46,9 @@ Thumbs.db
 # Reverse-engineering dumps (not needed to build)
 libcocos2dcpp.c
 libcocos2dcpp.lst
+*.apk
+*.apk.idsig
+*.so
+exam-decoded/
+migration-backups/
+tools/apktool*.jar

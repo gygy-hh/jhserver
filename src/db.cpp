@@ -72,6 +72,7 @@ DbAccount row_to_account(MYSQL_ROW row) {
   acc.psw_salt = row[2] ? row[2] : "";
   acc.psw_hash = row[3] ? row[3] : "";
   acc.created_at = row[4] ? std::strtoll(row[4], nullptr, 10) : 0;
+  acc.bl_exempt = row[5] && std::strtol(row[5], nullptr, 10) != 0;
   return acc;
 }
 
@@ -94,8 +95,25 @@ std::optional<DbAccount> query_one_account_unlocked(const std::string& sql) {
 }
 
 std::optional<DbAccount> find_account_unlocked(const std::string& acc) {
-  return query_one_account_unlocked("SELECT id, acc, psw_salt, psw_hash, created_at FROM accounts WHERE acc='" +
-                                    sql_escape(acc) + "' LIMIT 1");
+  return query_one_account_unlocked(
+      "SELECT id, acc, psw_salt, psw_hash, created_at, bl_exempt FROM accounts WHERE acc='" + sql_escape(acc) +
+      "' LIMIT 1");
+}
+
+void ensure_bl_exempt_column() {
+  exec_sql("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='" + sql_escape(g_cfg.database) +
+           "' AND TABLE_NAME='accounts' AND COLUMN_NAME='bl_exempt'");
+  MYSQL_RES* res = mysql_store_result(g_conn);
+  if (!res) {
+    throw std::runtime_error("mysql store result failed");
+  }
+  MYSQL_ROW row = mysql_fetch_row(res);
+  const bool exists = row && row[0] && std::strtol(row[0], nullptr, 10) > 0;
+  mysql_free_result(res);
+  if (!exists) {
+    exec_sql("ALTER TABLE accounts ADD COLUMN bl_exempt TINYINT NOT NULL DEFAULT 0");
+    std::cout << "[db] added accounts.bl_exempt\n";
+  }
 }
 
 void ensure_schema() {
@@ -108,6 +126,7 @@ void ensure_schema() {
       psw_salt VARCHAR(32) NOT NULL DEFAULT '',
       psw_hash VARCHAR(64) NOT NULL DEFAULT '',
       created_at BIGINT NOT NULL DEFAULT 0,
+      bl_exempt TINYINT NOT NULL DEFAULT 0,
       PRIMARY KEY (id),
       UNIQUE KEY uk_acc (acc)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -132,9 +151,9 @@ void upsert_admin(const std::string& admin_acc, const std::string& admin_psw) {
   const std::string salt = random_salt();
   const std::string hash = hash_password(salt, admin_psw);
   const int64_t ts = now_sec();
-  exec_sql("INSERT INTO accounts (acc, psw_salt, psw_hash, created_at) VALUES ('" + sql_escape(admin_acc) + "','" +
+  exec_sql("INSERT IGNORE INTO accounts (acc, psw_salt, psw_hash, created_at) VALUES ('" + sql_escape(admin_acc) + "','" +
            sql_escape(salt) + "','" + sql_escape(hash) + "'," + std::to_string(ts) +
-           ") ON DUPLICATE KEY UPDATE psw_salt=VALUES(psw_salt), psw_hash=VALUES(psw_hash)");
+           ")");
   std::cout << "[db] admin account ready: " << admin_acc << "\n";
 }
 
@@ -239,6 +258,7 @@ bool db_init(const MysqlConfig& config, const std::string& admin_acc, const std:
 
   try {
     ensure_schema();
+    ensure_bl_exempt_column();
     import_legacy_accounts(legacy_accounts_path);
     upsert_admin(admin_acc, admin_psw);
   } catch (const std::exception& ex) {
@@ -293,6 +313,19 @@ bool db_set_password(const std::string& acc, const std::string& salt, const std:
   return mysql_affected_rows(g_conn) > 0;
 }
 
+bool db_set_bl_exempt(const std::string& acc, bool exempt) {
+  std::lock_guard<std::mutex> lock(g_mu);
+  if (!g_conn || acc.empty()) {
+    return false;
+  }
+  if (!find_account_unlocked(acc)) {
+    return false;
+  }
+  exec_sql("UPDATE accounts SET bl_exempt=" + std::string(exempt ? "1" : "0") + " WHERE acc='" + sql_escape(acc) +
+           "'");
+  return true;
+}
+
 bool db_delete_account(const std::string& acc) {
   std::lock_guard<std::mutex> lock(g_mu);
   if (!g_conn) {
@@ -309,7 +342,7 @@ std::vector<DbAccount> db_list_accounts() {
   if (!g_conn) {
     return out;
   }
-  exec_sql("SELECT id, acc, psw_salt, psw_hash, created_at FROM accounts ORDER BY id");
+  exec_sql("SELECT id, acc, psw_salt, psw_hash, created_at, bl_exempt FROM accounts ORDER BY id");
   MYSQL_RES* res = mysql_store_result(g_conn);
   if (!res) {
     return out;

@@ -17,6 +17,7 @@ add_executable(jh_server
   src/auth.cpp
   src/session.cpp
   src/db.cpp
+  src/redis.cpp
   src/storage.cpp
   src/mail.cpp
   src/save_crypto.cpp
@@ -24,10 +25,23 @@ add_executable(jh_server
   src/update.cpp
 )
 
+add_executable(test_mail_redis
+  tests/test_mail_redis.cpp
+  src/crypto.cpp
+  src/mail.cpp
+  src/redis.cpp
+)
+
 target_include_directories(jh_server PRIVATE include third_party)
+target_include_directories(test_mail_redis PRIVATE include third_party)
 target_compile_definitions(jh_server PRIVATE
   CPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH=67108864
 )
+
+if(MSVC)
+  target_compile_options(jh_server PRIVATE /utf-8)
+  target_compile_options(test_mail_redis PRIVATE /utf-8)
+endif()
 
 set(JH_MYSQL_HINTS
   "${CMAKE_SOURCE_DIR}/third_party/mysql"
@@ -92,6 +106,7 @@ endif()
 
 if(WIN32)
   target_link_libraries(jh_server PRIVATE ws2_32 secur32 shlwapi advapi32 crypt32)
+  target_link_libraries(test_mail_redis PRIVATE ws2_32)
   file(GLOB JH_MYSQL_DLLS
     "${CMAKE_SOURCE_DIR}/third_party/mysql/lib/libmysql.dll"
     "${CMAKE_SOURCE_DIR}/third_party/mysql/lib/libmariadb.dll"

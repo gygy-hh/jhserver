@@ -17,6 +17,7 @@ g++ -std=c++17 -O1 -g0 \
   "$ROOT"/src/auth.cpp \
   "$ROOT"/src/session.cpp \
   "$ROOT"/src/db.cpp \
+  "$ROOT"/src/redis.cpp \
   "$ROOT"/src/storage.cpp \
   "$ROOT"/src/mail.cpp \
   "$ROOT"/src/save_crypto.cpp \

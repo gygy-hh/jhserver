@@ -3,10 +3,12 @@
 #include "jh/crypto.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 
@@ -20,9 +22,17 @@ namespace {
 
 using json = nlohmann::json;
 
+struct DocCache {
+  std::string compressed;
+  std::string md5;
+  uint64_t size = 0;
+  int version = 0;
+};
+
 std::mutex g_mu;
 std::string g_data_dir;
 std::string g_default_base_url;
+std::shared_ptr<const DocCache> g_doc_cache;
 std::mutex g_doc_nonce_mu;
 std::unordered_map<std::string, int64_t> g_doc_nonces;
 
@@ -278,13 +288,27 @@ bool compress_doc_transport(const std::string& input, std::string& output) {
   output.resize(static_cast<size_t>(compressed_size));
   const int rc = compress2(reinterpret_cast<Bytef*>(output.data()), &compressed_size,
                            reinterpret_cast<const Bytef*>(input.data()),
-                           static_cast<uLong>(input.size()), Z_BEST_COMPRESSION);
+                           static_cast<uLong>(input.size()), Z_DEFAULT_COMPRESSION);
   if (rc != Z_OK) {
     output.clear();
     return false;
   }
   output.resize(static_cast<size_t>(compressed_size));
   return true;
+}
+
+std::shared_ptr<DocCache> build_doc_cache(const std::string& content, int version) {
+  if (content.empty() || content.size() > kMaxDocBytes) {
+    return nullptr;
+  }
+  auto cache = std::make_shared<DocCache>();
+  cache->md5 = crypto::md5_hex(content);
+  cache->size = static_cast<uint64_t>(content.size());
+  cache->version = version;
+  if (!compress_doc_transport(content, cache->compressed)) {
+    return nullptr;
+  }
+  return cache;
 }
 
 std::string resolve_apk_url(const Manifest& m, const std::string& base_url) {
@@ -368,6 +392,21 @@ Manifest load_manifest_unlocked() {
   } catch (...) {
   }
   return m;
+}
+
+bool refresh_doc_cache_unlocked(int version) {
+  const auto content = load_doc_unlocked();
+  if (!content) {
+    g_doc_cache.reset();
+    return false;
+  }
+  auto cache = build_doc_cache(*content, version);
+  if (!cache) {
+    g_doc_cache.reset();
+    return false;
+  }
+  g_doc_cache = std::move(cache);
+  return true;
 }
 
 json build_update_payload(const Manifest& m, int client_json_ver, int client_asset_ver, int client_prog_ver,
@@ -610,6 +649,7 @@ void init(const std::string& data_dir, const ServerConfig& config) {
     g_default_base_url = "http://" + config.host + ":" + std::to_string(config.port);
   }
   ensure_defaults_unlocked();
+  refresh_doc_cache_unlocked(load_manifest_unlocked().doc_version);
 }
 
 Manifest get_manifest() {
@@ -783,32 +823,25 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
       return;
     }
 
-    std::optional<std::string> content;
+    std::shared_ptr<const DocCache> cache;
     {
       std::lock_guard<std::mutex> lock(g_mu);
-      content = load_doc_unlocked();
+      cache = g_doc_cache;
     }
-    if (!content) {
+    if (!cache) {
       res.status = 404;
       res.set_content(R"({"error":"doc not configured"})", "application/json; charset=utf-8");
       return;
     }
 
-    const Manifest m = get_manifest();
-    const std::string doc_md5 = crypto::md5_hex(*content);
-    const std::string size = std::to_string(content->size());
+    const std::string size = std::to_string(cache->size);
     const std::string response_signature = crypto::md5_hex(
-        config.remote_doc_secret + "|" + timestamp + "|" + nonce + "|" + doc_md5 + "|" + size);
-    std::string compressed;
-    if (!compress_doc_transport(*content, compressed)) {
-      res.status = 500;
-      res.set_content(R"({"error":"compression failed"})", "application/json; charset=utf-8");
-      return;
-    }
+        config.remote_doc_secret + "|" + timestamp + "|" + nonce + "|" + cache->md5 + "|" + size);
+    std::string compressed = cache->compressed;
     crypt_doc_transport(compressed, config.remote_doc_secret, timestamp, nonce);
     res.set_header("Cache-Control", "no-store");
-    res.set_header("X-Doc-MD5", doc_md5);
-    res.set_header("X-Doc-Version", std::to_string(m.doc_version));
+    res.set_header("X-Doc-MD5", cache->md5);
+    res.set_header("X-Doc-Version", std::to_string(cache->version));
     res.set_header("X-Doc-Size", size);
     res.set_header("X-Doc-Encoding", "deflate");
     res.set_header("X-Doc-Signature", response_signature);
@@ -1045,20 +1078,33 @@ void register_admin_routes(httplib::Server& server, const ServerConfig& config) 
       return;
     }
 
-    Manifest m = get_manifest();
+    auto cache = build_doc_cache(encrypted, 0);
+    if (!cache) {
+      res.status = 500;
+      res.set_content(R"({"error":"compression failed"})", "application/json; charset=utf-8");
+      return;
+    }
+
+    Manifest m;
     {
       std::lock_guard<std::mutex> lock(g_mu);
-      if (!write_doc_unlocked(encrypted) || !refresh_doc_metadata_unlocked(m)) {
+      m = load_manifest_unlocked();
+      m.doc_version += 1;
+      m.doc_md5 = cache->md5;
+      m.doc_size = cache->size;
+      m.updated_at = static_cast<int64_t>(std::time(nullptr));
+      cache->version = m.doc_version;
+      if (!write_doc_unlocked(encrypted)) {
         res.status = 500;
         res.set_content(R"({"error":"save failed"})", "application/json; charset=utf-8");
         return;
       }
-    }
-    m.doc_version += 1;
-    if (!save_manifest(m)) {
-      res.status = 500;
-      res.set_content(R"({"error":"manifest save failed"})", "application/json; charset=utf-8");
-      return;
+      if (!save_manifest_unlocked(m)) {
+        res.status = 500;
+        res.set_content(R"({"error":"manifest save failed"})", "application/json; charset=utf-8");
+        return;
+      }
+      g_doc_cache = std::move(cache);
     }
     res.set_content(
         json{{"ok", true},

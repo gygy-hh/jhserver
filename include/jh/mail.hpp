@@ -1,5 +1,7 @@
 #pragma once
 
+#include "jh/config.hpp"
+
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -10,50 +12,44 @@
 
 namespace jh::mail {
 
-struct MailRecord {
-  std::string id;
-  std::string desp;
+struct MailEntry {
+  std::string channel;
+  std::string acc;
+  int area = 1;
   std::map<std::string, int> items;
-  int area = 0;
-  int64_t created_at = 0;
-  int64_t push_version = 0;
-  // pending: 待推送 | pushed: 已通过 getInitData 实时发放
-  // in_save/claimed: 兼容旧版云存档邮件流程
-  std::string status;
+  std::string begin_at;
+  std::string end_at;
 };
 
-struct BroadcastJob {
+struct GlobalMailSchedule {
   std::string id;
-  std::string desp;
+  std::string channel;
   std::map<std::string, int> items;
   int64_t scheduled_at = 0;
   int64_t created_at = 0;
-  int64_t completed_at = 0;
-  size_t recipient_count = 0;
-  size_t sent_count = 0;
-  std::string status;
 };
 
-void init(const std::string& data_dir);
+bool init(const RedisConfig& config, std::string* error = nullptr);
 
-std::string send(const std::string& acc, int area, const std::string& desp,
+bool send(const std::string& channel, const std::string& acc, int area,
+          const nlohmann::json& base_huo_dong, const std::map<std::string, int>& items);
+bool send_global(const std::string& channel, const nlohmann::json& base_huo_dong,
                  const std::map<std::string, int>& items);
-std::vector<MailRecord> list(const std::string& acc, int area);
-bool remove(const std::string& acc, int area, const std::string& mail_id);
-void remove_account(const std::string& acc);
-
-std::vector<MailRecord> pending_for_injection(const std::string& acc, int area);
-void mark_in_save(const std::string& acc, int area, const std::vector<std::string>& mail_ids);
-void mark_pushed(const std::string& acc, int area, const std::vector<std::string>& mail_ids);
-
-// uploadSave 时对比 dat.json.myGift，将已消失的邮件标记为 claimed
-void sync_claimed_from_save(const std::string& acc, int area, int save_index, const std::string& save_blob);
-
-size_t pending_count(const std::string& acc, int area);
-
-std::string create_broadcast(const std::string& desp, const std::map<std::string, int>& items,
-                             int64_t scheduled_at);
-std::vector<BroadcastJob> list_broadcasts();
-bool cancel_broadcast(const std::string& job_id);
+std::optional<nlohmann::json> get_huo_dong(const std::string& channel,
+                                          const std::string& acc, int area);
+std::optional<nlohmann::json> get_global_huo_dong(const std::string& channel);
+std::optional<nlohmann::json> take_huo_dong(const std::string& channel,
+                                           const std::string& acc, int area);
+std::optional<nlohmann::json> take_global_huo_dong(const std::string& channel,
+                                                  const std::string& acc, int area);
+std::vector<MailEntry> list(const std::string& channel);
+std::optional<MailEntry> detail(const std::string& channel, const std::string& acc, int area);
+std::optional<MailEntry> global_detail(const std::string& channel);
+bool remove(const std::string& channel, const std::string& acc, int area);
+bool remove_global(const std::string& channel);
+std::string schedule_global(const std::string& channel, const nlohmann::json& base_huo_dong,
+                            const std::map<std::string, int>& items, int64_t scheduled_at);
+std::vector<GlobalMailSchedule> list_global_schedules(const std::string& channel);
+bool cancel_global_schedule(const std::string& id);
 
 }  // namespace jh::mail

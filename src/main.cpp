@@ -34,7 +34,11 @@ int main(int argc, char** argv) {
 
   jh::storage::init(config.data_dir);
   jh::save_crypto::init(config.data_dir);
-  jh::mail::init(config.data_dir);
+  std::string redis_error;
+  if (!jh::mail::init(config.redis, &redis_error)) {
+    std::cerr << "Failed to connect Redis: " << redis_error << "\n";
+    return 1;
+  }
   jh::update::init(config.data_dir, config);
 
   jh::AuthConfig auth_cfg;
@@ -42,9 +46,13 @@ int main(int argc, char** argv) {
   jh::auth_init(auth_cfg);
 
   httplib::Server server;
+  server.new_task_queue = [] { return new httplib::ThreadPool(32); };
   server.set_read_timeout(1800, 0);
   server.set_write_timeout(1800, 0);
-  server.set_keep_alive_timeout(180);
+  // Game clients poll frequently. Do not let idle keep-alive connections
+  // monopolize the worker pool and prevent new logins from being accepted.
+  server.set_keep_alive_max_count(1);
+  server.set_keep_alive_timeout(5);
   server.set_payload_max_length(2ULL * 1024 * 1024 * 1024);
   server.set_pre_routing_handler([&config](const httplib::Request& req, httplib::Response& res) {
     if (req.path.rfind("/admin", 0) == 0) {
@@ -89,6 +97,7 @@ int main(int argc, char** argv) {
             << "  Admin panel: http://127.0.0.1:" << config.port << "/admin\n"
             << "  game_version(ver): " << config.game_version << "\n"
             << "  mysql: " << config.mysql.host << ":" << config.mysql.port << "/" << config.mysql.database << "\n"
+            << "  redis: " << config.redis.host << ":" << config.redis.port << "/" << config.redis.database << "\n"
             << "  admin_acc: " << config.admin_acc << "\n"
             << std::flush;
 

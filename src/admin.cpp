@@ -98,6 +98,7 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
                        {"id", acc.id},
                        {"mtt", crypto::calc_mtt(acc.id)},
                        {"has_password", acc.has_password},
+                       {"bl_exempt", acc.bl_exempt},
                        {"created_at", acc.created_at},
                        {"created_at_text", format_time(acc.created_at)}});
     }
@@ -108,9 +109,13 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
     json items = json::array();
     for (const auto& save : storage::list_saves()) {
       items.push_back({{"acc", save.acc},
+                       {"username", save.username},
                        {"area", save.area},
+                       {"lev", save.lev},
                        {"size", save.size},
                        {"size_text", format_size(save.size)},
+                       {"has_blob", save.has_blob},
+                       {"has_meta", save.has_meta},
                        {"updated_at", save.updated_at},
                        {"updated_at_text", format_time(save.updated_at)}});
     }
@@ -164,6 +169,33 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
     res.set_content(R"({"ok":true})", "application/json; charset=utf-8");
   });
 
+  server.Post("/admin/api/save/download-cd/reset",
+              [](const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+      body = req.body.empty() ? json::object() : json::parse(req.body);
+    } catch (...) {
+      res.status = 400;
+      res.set_content(R"({"error":"invalid json"})", "application/json; charset=utf-8");
+      return;
+    }
+    const std::string acc = body.value("acc", "");
+    const int area = body.value("area", 0);
+    if (acc.empty() || area <= 0) {
+      res.status = 400;
+      res.set_content(R"({"error":"valid acc and area required"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+    if (!storage::clear_manual_download(acc, area)) {
+      res.status = 404;
+      res.set_content(R"({"error":"save metadata not found"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+    res.set_content(R"({"ok":true})", "application/json; charset=utf-8");
+  });
+
   server.Delete("/admin/api/account", [](const httplib::Request& req, httplib::Response& res) {
     if (!req.has_param("acc")) {
       res.status = 400;
@@ -204,33 +236,85 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
     res.set_content(json{{"ok", true}, {"acc", acc}}.dump(), "application/json; charset=utf-8");
   });
 
-  server.Get("/admin/api/mails", [](const httplib::Request& req, httplib::Response& res) {
-    if (!req.has_param("acc")) {
+  server.Post("/admin/api/account/bl-exempt", [](const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+      body = req.body.empty() ? json::object() : json::parse(req.body);
+    } catch (...) {
       res.status = 400;
-      res.set_content(R"({"error":"acc required"})", "application/json; charset=utf-8");
+      res.set_content(R"({"error":"invalid json"})", "application/json; charset=utf-8");
       return;
     }
-    const std::string acc = req.get_param_value("acc");
-    int area = 1;
-    if (req.has_param("area")) {
-      area = std::stoi(req.get_param_value("area"));
+    const std::string acc = body.value("acc", "");
+    if (acc.empty() || !body.contains("exempt") || !body["exempt"].is_boolean()) {
+      res.status = 400;
+      res.set_content(R"({"error":"acc and exempt required"})", "application/json; charset=utf-8");
+      return;
     }
+    const bool exempt = body["exempt"].get<bool>();
+    if (!storage::set_bl_exempt(acc, exempt)) {
+      res.status = 404;
+      res.set_content(R"({"error":"account not found"})", "application/json; charset=utf-8");
+      return;
+    }
+    res.set_content(json{{"ok", true}, {"acc", acc}, {"bl_exempt", exempt}}.dump(),
+                    "application/json; charset=utf-8");
+  });
+
+  server.Get("/admin/api/mails", [](const httplib::Request& req, httplib::Response& res) {
+    if (!req.has_param("channel")) {
+      res.status = 400;
+      res.set_content(R"({"error":"channel required"})", "application/json; charset=utf-8");
+      return;
+    }
+    const std::string channel = req.get_param_value("channel");
     json items = json::array();
-    for (const auto& m : mail::list(acc, area)) {
+    for (const auto& m : mail::list(channel)) {
       json props = json::object();
       for (const auto& [k, v] : m.items) {
         props[k] = v;
       }
-      items.push_back({{"id", m.id},
-                       {"desp", m.desp},
+      items.push_back({{"channel", m.channel},
+                       {"acc", m.acc},
                        {"area", m.area},
                        {"items", props},
-                       {"status", m.status},
-                       {"push_version", m.push_version},
-                       {"created_at", m.created_at},
-                       {"created_at_text", format_time(m.created_at)}});
+                       {"begin_at", m.begin_at},
+                       {"end_at", m.end_at}});
     }
-    res.set_content(json{{"acc", acc}, {"area", area}, {"items", items}, {"pending", mail::pending_count(acc, area)}}.dump(2),
+    res.set_content(json{{"channel", channel}, {"items", items}}.dump(2),
+                    "application/json; charset=utf-8");
+  });
+
+  server.Get("/admin/api/mail", [](const httplib::Request& req, httplib::Response& res) {
+    if (!req.has_param("channel") || !req.has_param("acc") || !req.has_param("area")) {
+      res.status = 400;
+      res.set_content(R"({"error":"channel, acc and area required"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+    int area = 0;
+    try {
+      area = std::stoi(req.get_param_value("area"));
+    } catch (...) {
+    }
+    const auto entry =
+        mail::detail(req.get_param_value("channel"), req.get_param_value("acc"), area);
+    if (!entry) {
+      res.status = 404;
+      res.set_content(R"({"error":"mail not found"})", "application/json; charset=utf-8");
+      return;
+    }
+    json props = json::object();
+    for (const auto& [prop_id, count] : entry->items) {
+      props[prop_id] = count;
+    }
+    res.set_content(json{{"channel", entry->channel},
+                         {"acc", entry->acc},
+                         {"area", entry->area},
+                         {"items", props},
+                         {"begin_at", entry->begin_at},
+                         {"end_at", entry->end_at}}
+                        .dump(2),
                     "application/json; charset=utf-8");
   });
 
@@ -243,23 +327,17 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
       res.set_content(R"({"error":"invalid json"})", "application/json; charset=utf-8");
       return;
     }
+    const std::string channel = body.value("channel", "");
     const std::string acc = body.value("acc", "");
-    if (acc.empty()) {
-      res.status = 400;
-      res.set_content(R"({"error":"acc required"})", "application/json; charset=utf-8");
-      return;
-    }
-    const int area = body.value("area", 0);
-    if (area <= 0) {
-      res.status = 400;
-      res.set_content(R"({"error":"area required"})", "application/json; charset=utf-8");
-      return;
-    }
-    const std::string desp = body.value("desp", body.value("description", "系统邮件"));
     std::map<std::string, int> items;
     if (body.contains("items") && body["items"].is_object()) {
       for (auto it = body["items"].begin(); it != body["items"].end(); ++it) {
-        items[it.key()] = it.value().get<int>();
+        if (it.value().is_number_integer()) {
+          const int count = it.value().get<int>();
+          if (count > 0) {
+            items[it.key()] = count;
+          }
+        }
       }
     } else if (body.contains("prop_id")) {
       const std::string prop_id = std::to_string(body.value("prop_id", 0));
@@ -270,24 +348,46 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
       res.set_content(R"({"error":"items required"})", "application/json; charset=utf-8");
       return;
     }
+    if (channel.empty() || channel.find(':') != std::string::npos || acc.empty() ||
+        acc.find(':') != std::string::npos) {
+      res.status = 400;
+      res.set_content(R"({"error":"valid channel and acc required"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+    const int area = body.value("area", 0);
+    if (area <= 0) {
+      res.status = 400;
+      res.set_content(R"({"error":"area required"})", "application/json; charset=utf-8");
+      return;
+    }
     storage::ensure_account(acc);
-    const std::string id = mail::send(acc, area, desp, items);
-    res.set_content(json{{"ok", true}, {"id", id}, {"acc", acc}, {"area", area}}.dump(), "application/json; charset=utf-8");
+    if (!mail::send(channel, acc, area, update::get_huo_dong(), items)) {
+      res.status = 503;
+      res.set_content(R"({"error":"redis mail write failed"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+    res.set_content(
+        json{{"ok", true}, {"channel", channel}, {"acc", acc}, {"area", area}}.dump(),
+        "application/json; charset=utf-8");
   });
 
   server.Delete("/admin/api/mail", [](const httplib::Request& req, httplib::Response& res) {
-    if (!req.has_param("acc") || !req.has_param("id")) {
+    if (!req.has_param("channel") || !req.has_param("acc") || !req.has_param("area")) {
       res.status = 400;
-      res.set_content(R"({"error":"acc and id required"})", "application/json; charset=utf-8");
+      res.set_content(R"({"error":"channel, acc and area required"})",
+                      "application/json; charset=utf-8");
       return;
     }
+    const std::string channel = req.get_param_value("channel");
     const std::string acc = req.get_param_value("acc");
-    const std::string id = req.get_param_value("id");
-    int area = 1;
-    if (req.has_param("area")) {
+    int area = 0;
+    try {
       area = std::stoi(req.get_param_value("area"));
+    } catch (...) {
     }
-    if (!mail::remove(acc, area, id)) {
+    if (!mail::remove(channel, acc, area)) {
       res.status = 404;
       res.set_content(R"({"error":"not found"})", "application/json; charset=utf-8");
       return;
@@ -295,30 +395,33 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
     res.set_content(R"({"ok":true})", "application/json; charset=utf-8");
   });
 
-  server.Get("/admin/api/broadcasts", [](const httplib::Request&, httplib::Response& res) {
-    json jobs = json::array();
-    for (const auto& job : mail::list_broadcasts()) {
-      json items = json::object();
-      for (const auto& [prop_id, count] : job.items) {
-        items[prop_id] = count;
-      }
-      jobs.push_back({
-          {"id", job.id},
-          {"desp", job.desp},
-          {"items", items},
-          {"scheduled_at", job.scheduled_at},
-          {"scheduled_at_text", format_time(job.scheduled_at)},
-          {"created_at", job.created_at},
-          {"completed_at", job.completed_at},
-          {"recipient_count", job.recipient_count},
-          {"sent_count", job.sent_count},
-          {"status", job.status},
-      });
+  server.Get("/admin/api/global-mail", [](const httplib::Request& req, httplib::Response& res) {
+    if (!req.has_param("channel")) {
+      res.status = 400;
+      res.set_content(R"({"error":"channel required"})", "application/json; charset=utf-8");
+      return;
     }
-    res.set_content(json{{"items", jobs}}.dump(), "application/json; charset=utf-8");
+    const std::string channel = req.get_param_value("channel");
+    const auto entry = mail::global_detail(channel);
+    if (!entry) {
+      res.set_content(json{{"channel", channel}, {"active", false}}.dump(),
+                      "application/json; charset=utf-8");
+      return;
+    }
+    json props = json::object();
+    for (const auto& [prop_id, count] : entry->items) {
+      props[prop_id] = count;
+    }
+    res.set_content(json{{"channel", channel},
+                         {"active", true},
+                         {"items", props},
+                         {"begin_at", entry->begin_at},
+                         {"end_at", entry->end_at}}
+                        .dump(2),
+                    "application/json; charset=utf-8");
   });
 
-  server.Post("/admin/api/broadcasts", [](const httplib::Request& req, httplib::Response& res) {
+  server.Post("/admin/api/global-mail", [](const httplib::Request& req, httplib::Response& res) {
     json body;
     try {
       body = req.body.empty() ? json::object() : json::parse(req.body);
@@ -327,30 +430,129 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
       res.set_content(R"({"error":"invalid json"})", "application/json; charset=utf-8");
       return;
     }
+    const std::string channel = body.value("channel", "");
     std::map<std::string, int> items;
     if (body.contains("items") && body["items"].is_object()) {
       for (auto it = body["items"].begin(); it != body["items"].end(); ++it) {
-        const int count = it.value().get<int>();
-        if (count > 0) {
-          items[it.key()] = count;
+        if (it.value().is_number_integer()) {
+          const int count = it.value().get<int>();
+          if (count > 0) {
+            items[it.key()] = count;
+          }
         }
       }
+    }
+    if (channel.empty() || channel.find(':') != std::string::npos) {
+      res.status = 400;
+      res.set_content(R"({"error":"valid channel required"})",
+                      "application/json; charset=utf-8");
+      return;
     }
     if (items.empty()) {
       res.status = 400;
       res.set_content(R"({"error":"items required"})", "application/json; charset=utf-8");
       return;
     }
-    const int64_t scheduled_at = body.value("scheduled_at", static_cast<int64_t>(std::time(nullptr)));
-    const std::string id = mail::create_broadcast(body.value("desp", "全服奖励"), items, scheduled_at);
-    res.set_content(json{{"ok", true}, {"id", id}, {"scheduled_at", scheduled_at}}.dump(),
+    if (!mail::send_global(channel, update::get_huo_dong(), items)) {
+      res.status = 503;
+      res.set_content(R"({"error":"redis global mail write failed"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+    res.set_content(json{{"ok", true}, {"channel", channel}, {"scope", "global"}}.dump(),
                     "application/json; charset=utf-8");
   });
 
-  server.Delete("/admin/api/broadcasts", [](const httplib::Request& req, httplib::Response& res) {
-    if (!req.has_param("id") || !mail::cancel_broadcast(req.get_param_value("id"))) {
+  server.Delete("/admin/api/global-mail", [](const httplib::Request& req,
+                                              httplib::Response& res) {
+    if (!req.has_param("channel")) {
+      res.status = 400;
+      res.set_content(R"({"error":"channel required"})", "application/json; charset=utf-8");
+      return;
+    }
+    if (!mail::remove_global(req.get_param_value("channel"))) {
       res.status = 404;
-      res.set_content(R"({"error":"scheduled job not found"})", "application/json; charset=utf-8");
+      res.set_content(R"({"error":"not found"})", "application/json; charset=utf-8");
+      return;
+    }
+    res.set_content(R"({"ok":true})", "application/json; charset=utf-8");
+  });
+
+  server.Get("/admin/api/global-mail/schedules",
+             [](const httplib::Request& req, httplib::Response& res) {
+    if (!req.has_param("channel")) {
+      res.status = 400;
+      res.set_content(R"({"error":"channel required"})", "application/json; charset=utf-8");
+      return;
+    }
+    json items = json::array();
+    for (const auto& schedule : mail::list_global_schedules(req.get_param_value("channel"))) {
+      json props = json::object();
+      for (const auto& [prop_id, count] : schedule.items) {
+        props[prop_id] = count;
+      }
+      items.push_back({{"id", schedule.id},
+                       {"channel", schedule.channel},
+                       {"items", props},
+                       {"scheduled_at", schedule.scheduled_at},
+                       {"scheduled_at_text", format_time(schedule.scheduled_at)},
+                       {"created_at", schedule.created_at}});
+    }
+    res.set_content(json{{"items", items}}.dump(2), "application/json; charset=utf-8");
+  });
+
+  server.Post("/admin/api/global-mail/schedules",
+              [](const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+      body = req.body.empty() ? json::object() : json::parse(req.body);
+    } catch (...) {
+      res.status = 400;
+      res.set_content(R"({"error":"invalid json"})", "application/json; charset=utf-8");
+      return;
+    }
+    const std::string channel = body.value("channel", "");
+    const int64_t scheduled_at = body.value("scheduled_at", static_cast<int64_t>(0));
+    std::map<std::string, int> items;
+    if (body.contains("items") && body["items"].is_object()) {
+      for (auto it = body["items"].begin(); it != body["items"].end(); ++it) {
+        if (it.value().is_number_integer()) {
+          const int count = it.value().get<int>();
+          if (count > 0) {
+            items[it.key()] = count;
+          }
+        }
+      }
+    }
+    if (channel.empty() || channel.find(':') != std::string::npos || items.empty() ||
+        scheduled_at <= static_cast<int64_t>(std::time(nullptr))) {
+      res.status = 400;
+      res.set_content(R"({"error":"valid channel, items and future scheduled_at required"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+    const std::string id =
+        mail::schedule_global(channel, update::get_huo_dong(), items, scheduled_at);
+    if (id.empty()) {
+      res.status = 503;
+      res.set_content(R"({"error":"redis schedule write failed"})",
+                      "application/json; charset=utf-8");
+      return;
+    }
+    res.set_content(json{{"ok", true},
+                         {"id", id},
+                         {"channel", channel},
+                         {"scheduled_at", scheduled_at},
+                         {"scheduled_at_text", format_time(scheduled_at)}}
+                        .dump(),
+                    "application/json; charset=utf-8");
+  });
+
+  server.Delete("/admin/api/global-mail/schedules",
+                [](const httplib::Request& req, httplib::Response& res) {
+    if (!req.has_param("id") || !mail::cancel_global_schedule(req.get_param_value("id"))) {
+      res.status = 404;
+      res.set_content(R"({"error":"schedule not found"})", "application/json; charset=utf-8");
       return;
     }
     res.set_content(R"({"ok":true})", "application/json; charset=utf-8");

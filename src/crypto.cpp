@@ -370,7 +370,7 @@ bool is_encrypted_body_action(const std::string& action) {
   static const char* kActions[] = {
       "getInitData", "login", "register", "regist", "mail", "uploadSave", "downloadSave", "findSave", "reportChong",
       "recvJiHuoMa", "selTopFightPower", "uploadFightPower", "lunJianFightEnd", "lunJianFindEnemy", "selTopLunJian",
-      "selTopWuDao", "findEnemy", "wuDaoFightEnd", "idCard",
+      "selTopWuDao", "findEnemy", "wuDaoFightEnd", "idCard", "changePassword",
   };
   for (const char* a : kActions) {
     if (action == a) {
