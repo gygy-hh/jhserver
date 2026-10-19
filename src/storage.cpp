@@ -8,6 +8,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <mutex>
@@ -19,8 +20,13 @@ namespace jh::storage {
 
 namespace {
 
-std::mutex g_mu;
+constexpr size_t kSaveStripes = 16;
+std::mutex g_save_stripes[kSaveStripes];
 std::string g_data_dir;
+
+std::mutex& save_stripe(const std::string& acc) {
+  return g_save_stripes[std::hash<std::string>{}(acc) % kSaveStripes];
+}
 TtlCache<std::string, AccountAuthInfo> g_account_cache(100000);
 constexpr auto kAccountCacheTtl = std::chrono::minutes(10);
 
@@ -129,8 +135,8 @@ bool set_bl_exempt(const std::string& acc, bool exempt) {
 }
 
 bool save_cloud(const std::string& acc, int area, const std::string& save_json, const SaveMeta& meta) {
-  std::lock_guard<std::mutex> lock(g_mu);
   db_ensure_account(acc);
+  std::lock_guard<std::mutex> lock(save_stripe(acc));
   const int64_t now = std::time(nullptr);
   const int64_t save_time = meta.save_time > 0 ? meta.save_time : now;
 
@@ -165,7 +171,7 @@ bool save_cloud(const std::string& acc, int area, const std::string& save_json, 
 }
 
 std::optional<SaveMeta> get_save_meta(const std::string& acc, int area) {
-  std::lock_guard<std::mutex> lock(g_mu);
+  std::lock_guard<std::mutex> lock(save_stripe(acc));
   std::ifstream in(save_path(acc, area));
   if (!in) {
     return std::nullopt;
@@ -186,7 +192,7 @@ std::optional<SaveMeta> get_save_meta(const std::string& acc, int area) {
 }
 
 bool mark_manual_download(const std::string& acc, int area, int64_t at) {
-  std::lock_guard<std::mutex> lock(g_mu);
+  std::lock_guard<std::mutex> lock(save_stripe(acc));
   const std::string path = save_path(acc, area);
   std::ifstream in(path);
   if (!in) {
@@ -210,7 +216,7 @@ bool mark_manual_download(const std::string& acc, int area, int64_t at) {
 }
 
 bool clear_manual_download(const std::string& acc, int area) {
-  std::lock_guard<std::mutex> lock(g_mu);
+  std::lock_guard<std::mutex> lock(save_stripe(acc));
   const std::string path = save_path(acc, area);
   std::ifstream in(path);
   if (!in) {
@@ -234,7 +240,7 @@ bool clear_manual_download(const std::string& acc, int area) {
 }
 
 std::optional<std::string> load_cloud(const std::string& acc, int area) {
-  std::lock_guard<std::mutex> lock(g_mu);
+  std::lock_guard<std::mutex> lock(save_stripe(acc));
   {
     std::ifstream blob(save_blob_path(acc, area), std::ios::binary);
     if (blob) {
@@ -279,7 +285,6 @@ std::vector<AccountAuthInfo> list_accounts_auth() {
 }
 
 std::vector<SaveRecord> list_saves() {
-  std::lock_guard<std::mutex> lock(g_mu);
   const fs::path saves_dir = fs::path(g_data_dir) / "saves";
   if (!fs::exists(saves_dir)) {
     return {};
@@ -368,7 +373,7 @@ std::vector<SaveRecord> list_saves() {
 }
 
 bool delete_save(const std::string& acc, int area) {
-  std::lock_guard<std::mutex> lock(g_mu);
+  std::lock_guard<std::mutex> lock(save_stripe(acc));
   const bool a = fs::remove(save_path(acc, area));
   const bool b = fs::remove(save_blob_path(acc, area));
   return a || b;
@@ -380,6 +385,7 @@ bool delete_account(const std::string& acc) {
   }
   g_account_cache.erase(acc);
 
+  std::lock_guard<std::mutex> lock(save_stripe(acc));
   const fs::path saves_dir = fs::path(g_data_dir) / "saves";
   const std::string prefix = save_path(acc, 0);
   const auto pos = prefix.rfind('_');

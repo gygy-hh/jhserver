@@ -1,6 +1,7 @@
 #include "jh/admin.hpp"
 
 #include "jh/auth.hpp"
+#include "jh/gateway.hpp"
 #include "jh/config.hpp"
 
 #include "jh/crypto.hpp"
@@ -61,7 +62,7 @@ std::string format_size(size_t bytes) {
 
 }  // namespace
 
-void register_routes(httplib::Server& server, const ServerConfig& config) {
+void register_routes(gateway::Router& server, const ServerConfig& config) {
   server.Get("/admin", [](const httplib::Request&, httplib::Response& res) {
     res.set_content(load_admin_html(), "text/html; charset=utf-8");
   });

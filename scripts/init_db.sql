@@ -14,6 +14,30 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS bl_exempt TINYINT NOT NULL DEFAULT 0;
 
+CREATE TABLE IF NOT EXISTS lunjian_fighter (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  channel VARCHAR(64) NOT NULL,
+  account VARCHAR(128) NOT NULL,
+  area INT NOT NULL,
+  week_id BIGINT NOT NULL,
+  nick VARCHAR(64) NOT NULL DEFAULT '',
+  head INT NOT NULL DEFAULT 0,
+  fight_power INT NOT NULL DEFAULT 0,
+  score INT NOT NULL DEFAULT 0,
+  times_left INT NOT NULL DEFAULT 25,
+  times_day BIGINT NOT NULL DEFAULT 0,
+  fight_data MEDIUMTEXT,
+  loadout_json TEXT,
+  is_npc TINYINT NOT NULL DEFAULT 0,
+  utime BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lj (channel, account, area, week_id),
+  KEY idx_lj_match (channel, week_id, score)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE lunjian_fighter
+  CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash CHAR(32) NOT NULL,
   acc VARCHAR(128) NOT NULL,

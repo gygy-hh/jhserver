@@ -43,4 +43,8 @@ bool db_insert_session(const std::string& acc, const std::string& token_hash, in
 std::optional<DbSession> db_find_session(const std::string& token_hash);
 bool db_revoke_sessions(const std::string& acc);
 
+void db_exec(const std::string& sql);
+std::string db_escape(const std::string& input);
+std::vector<std::vector<std::string>> db_query(const std::string& sql);
+
 }  // namespace jh

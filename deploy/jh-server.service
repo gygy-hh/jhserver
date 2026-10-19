@@ -9,6 +9,12 @@ ExecStart=/opt/jh-server/build/jh_server --config /opt/jh-server/config.json
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65535
+# 2 核机器默认会给每个线程一块堆，高峰后不归还。限制成 2 块。
+Environment=MALLOC_ARENA_MAX=2
+# 超过后只压这个服务，不把整机和 MariaDB 一起打死。
+MemoryHigh=768M
+MemoryMax=1200M
+OOMPolicy=stop
 
 [Install]
 WantedBy=multi-user.target

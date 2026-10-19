@@ -2,10 +2,12 @@
 
 #include "jh/config.hpp"
 
-#include <httplib.h>
+namespace jh::gateway {
+class Router;
+}
 
 namespace jh::handlers {
 
-void register_routes(httplib::Server& server, const ServerConfig& config);
+void register_routes(gateway::Router& server, const ServerConfig& config);
 
 }  // namespace jh::handlers

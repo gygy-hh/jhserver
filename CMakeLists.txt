@@ -10,6 +10,7 @@ include(FetchContent)
 
 add_executable(jh_server
   src/main.cpp
+  src/gateway.cpp
   src/config.cpp
   src/crypto.cpp
   src/handlers.cpp
@@ -23,6 +24,13 @@ add_executable(jh_server
   src/save_crypto.cpp
   src/save_blob.cpp
   src/update.cpp
+  src/lunjian_pool.cpp
+  src/lunjian.cpp
+)
+
+add_executable(test_lunjian_pool
+  tests/test_lunjian_pool.cpp
+  src/lunjian_pool.cpp
 )
 
 add_executable(test_mail_redis
@@ -33,6 +41,7 @@ add_executable(test_mail_redis
 )
 
 target_include_directories(jh_server PRIVATE include third_party)
+target_include_directories(test_lunjian_pool PRIVATE include third_party)
 target_include_directories(test_mail_redis PRIVATE include third_party)
 target_compile_definitions(jh_server PRIVATE
   CPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH=67108864
@@ -40,6 +49,7 @@ target_compile_definitions(jh_server PRIVATE
 
 if(MSVC)
   target_compile_options(jh_server PRIVATE /utf-8)
+  target_compile_options(test_lunjian_pool PRIVATE /utf-8)
   target_compile_options(test_mail_redis PRIVATE /utf-8)
 endif()
 

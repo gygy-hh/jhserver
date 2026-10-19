@@ -40,6 +40,9 @@ scp (Join-Path $root "deploy\jh-server.service") "${remote}:${RemoteDir}/deploy/
 if (Test-Path (Join-Path $root "data\save_keys.json")) {
     scp (Join-Path $root "data\save_keys.json") "${remote}:${RemoteDir}/data/save_keys.json"
 }
+if (Test-Path (Join-Path $root "data\doc.json")) {
+    scp (Join-Path $root "data\doc.json") "${remote}:${RemoteDir}/data/doc.json"
+}
 
 Write-Host "Restart remote service..."
 $remoteCmd = "sudo chown root:jh-server ${RemoteDir}/config.json ${RemoteDir}/web/admin.html; sudo chmod 640 ${RemoteDir}/config.json; sudo chmod 644 ${RemoteDir}/web/admin.html; sudo chown -R jh-server:jh-server ${RemoteDir}/data; sudo cp ${RemoteDir}/deploy/jh-server.service /etc/systemd/system/jh-server.service; sudo systemctl daemon-reload; sudo systemctl enable jh-server; sudo systemctl restart jh-server; sleep 1; sudo systemctl --no-pager --full status jh-server; curl -sS http://127.0.0.1:18080/health; echo"

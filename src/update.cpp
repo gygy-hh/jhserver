@@ -1,5 +1,7 @@
 ﻿#include "jh/update.hpp"
 
+#include "jh/gateway.hpp"
+
 #include "jh/crypto.hpp"
 
 #include <algorithm>
@@ -32,6 +34,8 @@ struct DocCache {
 std::mutex g_mu;
 std::string g_data_dir;
 std::string g_default_base_url;
+bool g_manifest_loaded = false;
+Manifest g_manifest_cache;
 std::shared_ptr<const DocCache> g_doc_cache;
 std::mutex g_doc_nonce_mu;
 std::unordered_map<std::string, int64_t> g_doc_nonces;
@@ -502,6 +506,8 @@ bool save_manifest_unlocked(const Manifest& m) {
     }
   }
   sync_json_download_file_unlocked(m);
+  g_manifest_cache = m;
+  g_manifest_loaded = true;
   return true;
 }
 
@@ -548,12 +554,34 @@ void ensure_defaults_unlocked() {
 }
 
 bool serve_binary_file(const fs::path& path, httplib::Response& res, const std::string& mime) {
-  if (!fs::exists(path) || !fs::is_regular_file(path)) {
+  std::error_code ec;
+  if (!fs::is_regular_file(path, ec)) {
     return false;
   }
-  std::ifstream in(path, std::ios::binary);
-  std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  res.set_content(data, mime);
+  const auto file_size = fs::file_size(path, ec);
+  if (ec) {
+    return false;
+  }
+  auto file = std::make_shared<std::ifstream>(path, std::ios::binary);
+  if (!*file) {
+    return false;
+  }
+  res.set_content_provider(
+      static_cast<size_t>(file_size), mime,
+      [file](size_t offset, size_t length, httplib::DataSink& sink) {
+        if (length == 0) {
+          return true;
+        }
+        file->clear();
+        file->seekg(static_cast<std::streamoff>(offset));
+        std::string chunk(length, '\0');
+        file->read(chunk.data(), static_cast<std::streamsize>(length));
+        const auto got = file->gcount();
+        if (got <= 0) {
+          return false;
+        }
+        return sink.write(chunk.data(), static_cast<size_t>(got));
+      });
   return true;
 }
 
@@ -654,7 +682,11 @@ void init(const std::string& data_dir, const ServerConfig& config) {
 
 Manifest get_manifest() {
   std::lock_guard<std::mutex> lock(g_mu);
-  return load_manifest_unlocked();
+  if (!g_manifest_loaded) {
+    g_manifest_cache = load_manifest_unlocked();
+    g_manifest_loaded = true;
+  }
+  return g_manifest_cache;
 }
 
 bool save_manifest(const Manifest& manifest) {
@@ -775,7 +807,7 @@ std::vector<std::string> list_apk_files() {
   return out;
 }
 
-void register_routes(httplib::Server& server, const ServerConfig& config) {
+void register_routes(gateway::Router& server, const ServerConfig& config) {
   server.Get("/update/manifest", [&config](const httplib::Request& req, httplib::Response& res) {
     const Manifest m = get_manifest();
     json out = build_update_payload(m, 0, 0, 0, public_base_url(req, config));
@@ -881,7 +913,7 @@ void register_routes(httplib::Server& server, const ServerConfig& config) {
   });
 }
 
-void register_admin_routes(httplib::Server& server, const ServerConfig& config) {
+void register_admin_routes(gateway::Router& server, const ServerConfig& config) {
   server.Get("/admin/api/update", [&config](const httplib::Request& req, httplib::Response& res) {
     const Manifest m = get_manifest();
     const std::string base = public_base_url(req, config);

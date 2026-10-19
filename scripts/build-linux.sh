@@ -7,9 +7,12 @@ mkdir -p "$OUT"
 
 g++ -std=c++17 -O1 -g0 \
   -static -static-libgcc -static-libstdc++ -pthread \
+  -DCPPHTTPLIB_USE_POLL \
+  -DCPPHTTPLIB_LISTEN_BACKLOG=4096 \
   -DCPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH=67108864 \
   -I"$ROOT/include" -I"$ROOT/third_party" -I/usr/include/mariadb \
   "$ROOT"/src/main.cpp \
+  "$ROOT"/src/gateway.cpp \
   "$ROOT"/src/config.cpp \
   "$ROOT"/src/crypto.cpp \
   "$ROOT"/src/handlers.cpp \
@@ -23,6 +26,8 @@ g++ -std=c++17 -O1 -g0 \
   "$ROOT"/src/save_crypto.cpp \
   "$ROOT"/src/save_blob.cpp \
   "$ROOT"/src/update.cpp \
+  "$ROOT"/src/lunjian_pool.cpp \
+  "$ROOT"/src/lunjian.cpp \
   "$ROOT"/src/static_nss.cpp \
   -L/usr/lib/x86_64-linux-gnu \
   -Wl,--wrap=getaddrinfo \

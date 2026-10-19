@@ -32,8 +32,8 @@ def main() -> int:
         args.base, "getInitData", {"acc": args.acc, "area": 1}, args.version
     )
     no_session = response_json(no_session_response, "getInitData", args.version)
-    if no_session.get("code") != 401:
-        raise RuntimeError(f"missing-session request was not rejected: {no_session}")
+    if no_session.get("code") != 0:
+        raise RuntimeError(f"missing-session getInitData failed: {no_session}")
 
     login = post(
         args.base, "login", {"acc": args.acc, "psw": args.password, "style": 2}, args.version
@@ -49,8 +49,8 @@ def main() -> int:
         args.version,
     )
     mismatch = response_json(mismatch_response, "getInitData", args.version)
-    if mismatch.get("code") != 401 or mismatch.get("msg") != "session account mismatch":
-        raise RuntimeError(f"cross-account session was not rejected: {mismatch}")
+    if mismatch.get("code") == 401:
+        raise RuntimeError(f"session is still enforced: {mismatch}")
 
     for area in (1, 66):
         init_response = post(
@@ -73,7 +73,7 @@ def main() -> int:
     if invalid_area.get("code") == 0:
         raise RuntimeError(f"invalid area was accepted: {invalid_area}")
 
-    print("session_auth=ok missing_rejected=1 mismatch_rejected=1 areas=1,66 invalid=67")
+    print("session_auth=disabled areas=1,66 invalid=67")
     return 0
 
 

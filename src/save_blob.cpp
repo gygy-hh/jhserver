@@ -11,7 +11,9 @@ namespace jh::save_blob {
 
 namespace {
 
-using json = nlohmann::json;
+// 客户端 RapidJSON 按成员写入顺序遍历 prop，背包顺序就是这个顺序。
+// nlohmann::json 的对象是 std::map，解析后再 dump 会按键名重排。
+using json = nlohmann::ordered_json;
 
 std::vector<std::string> split_blob(const std::string& blob) {
   std::vector<std::string> parts;

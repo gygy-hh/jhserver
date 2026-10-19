@@ -1,6 +1,7 @@
 #include "jh/redis.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -149,20 +150,67 @@ struct Reply {
 }  // namespace
 
 struct Client::Impl {
+  struct Conn {
+    Socket socket = kInvalidSocket;
+    std::mutex mutex;
+  };
+
+  static constexpr int kPoolSize = 2;
+
   explicit Impl(RedisConfig config) : config(std::move(config)) {}
 
   RedisConfig config;
-  Socket socket = kInvalidSocket;
-  std::mutex mutex;
+  Conn conns[kPoolSize];
+  std::atomic<unsigned> next{0};
+  std::mutex error_mu;
   std::string error;
 
+  void set_error(const std::string& value) {
+    std::lock_guard<std::mutex> lock(error_mu);
+    error = value;
+  }
+
+  static Conn*& current() {
+    thread_local Conn* value = nullptr;
+    return value;
+  }
+
+  struct Hold {
+    Conn* previous = nullptr;
+    std::unique_lock<std::mutex> lock;
+
+    explicit Hold(Impl& impl) : previous(current()) {
+      const unsigned start = impl.next.fetch_add(1, std::memory_order_relaxed);
+      for (int i = 0; i < kPoolSize; ++i) {
+        Conn& conn = impl.conns[(start + static_cast<unsigned>(i)) % kPoolSize];
+        std::unique_lock<std::mutex> candidate(conn.mutex, std::try_to_lock);
+        if (!candidate.owns_lock()) {
+          continue;
+        }
+        lock = std::move(candidate);
+        current() = &conn;
+        return;
+      }
+      Conn& conn = impl.conns[start % kPoolSize];
+      lock = std::unique_lock<std::mutex>(conn.mutex);
+      current() = &conn;
+    }
+
+    ~Hold() { current() = previous; }
+  };
+
+  Socket& io() { return current()->socket; }
+
   ~Impl() {
-    close_unlocked();
+    for (Conn& conn : conns) {
+      close_socket(conn.socket);
+      conn.socket = kInvalidSocket;
+    }
   }
 
   void close_unlocked() {
-    close_socket(socket);
-    socket = kInvalidSocket;
+    close_socket(io());
+    io() = kInvalidSocket;
   }
 
   void send_all_unlocked(const std::string& data) {
@@ -171,9 +219,9 @@ struct Client::Impl {
 #ifdef _WIN32
       const int chunk = static_cast<int>(
           std::min<size_t>(data.size() - offset, static_cast<size_t>(std::numeric_limits<int>::max())));
-      const int sent = ::send(socket, data.data() + offset, chunk, 0);
+      const int sent = ::send(io(), data.data() + offset, chunk, 0);
 #else
-      const ssize_t sent = ::send(socket, data.data() + offset, data.size() - offset, 0);
+      const ssize_t sent = ::send(io(), data.data() + offset, data.size() - offset, 0);
 #endif
       if (sent <= 0) {
         throw std::runtime_error("Redis send failed");
@@ -185,9 +233,9 @@ struct Client::Impl {
   char receive_char_unlocked() {
     char value = 0;
 #ifdef _WIN32
-    const int received = recv(socket, &value, 1, 0);
+    const int received = recv(io(), &value, 1, 0);
 #else
-    const ssize_t received = recv(socket, &value, 1, 0);
+    const ssize_t received = recv(io(), &value, 1, 0);
 #endif
     if (received != 1) {
       throw std::runtime_error("Redis connection closed");
@@ -218,9 +266,9 @@ struct Client::Impl {
 #ifdef _WIN32
       const int chunk = static_cast<int>(
           std::min<size_t>(length - offset, static_cast<size_t>(std::numeric_limits<int>::max())));
-      const int received = recv(socket, data.data() + offset, chunk, 0);
+      const int received = recv(io(), data.data() + offset, chunk, 0);
 #else
-      const ssize_t received = recv(socket, data.data() + offset, length - offset, 0);
+      const ssize_t received = recv(io(), data.data() + offset, length - offset, 0);
 #endif
       if (received <= 0) {
         throw std::runtime_error("Redis connection closed");
@@ -299,7 +347,7 @@ struct Client::Impl {
       winsock_result = WSAStartup(MAKEWORD(2, 2), &data);
     });
     if (winsock_result != 0) {
-      error = "WSAStartup failed";
+      set_error("WSAStartup failed");
       return false;
     }
 #endif
@@ -310,7 +358,7 @@ struct Client::Impl {
     addrinfo* addresses = nullptr;
     const std::string port = std::to_string(config.port);
     if (getaddrinfo(config.host.c_str(), port.c_str(), &hints, &addresses) != 0) {
-      error = "Redis host resolution failed: " + config.host;
+      set_error("Redis host resolution failed: " + config.host);
       return false;
     }
     for (addrinfo* address = addresses; address != nullptr; address = address->ai_next) {
@@ -322,22 +370,22 @@ struct Client::Impl {
       if (connect_with_timeout(candidate, address->ai_addr,
                                static_cast<socklen_t>(address->ai_addrlen),
                                config.connect_timeout_ms)) {
-        socket = candidate;
+        io() = candidate;
         break;
       }
       close_socket(candidate);
     }
     freeaddrinfo(addresses);
-    if (socket == kInvalidSocket) {
-      error = "Redis connection failed: " + config.host + ":" + port;
+    if (io() == kInvalidSocket) {
+      set_error("Redis connection failed: " + config.host + ":" + port);
       return false;
     }
-    set_io_timeout(socket, config.connect_timeout_ms);
+    set_io_timeout(io(), config.connect_timeout_ms);
     try {
       if (!config.password.empty()) {
         const Reply auth = execute_raw_unlocked({"AUTH", config.password});
         if (auth.type == Reply::Type::Error) {
-          error = "Redis AUTH failed: " + auth.string;
+          set_error("Redis AUTH failed: " + auth.string);
           close_unlocked();
           return false;
         }
@@ -345,13 +393,13 @@ struct Client::Impl {
       if (config.database != 0) {
         const Reply select = execute_raw_unlocked({"SELECT", std::to_string(config.database)});
         if (select.type == Reply::Type::Error) {
-          error = "Redis SELECT failed: " + select.string;
+          set_error("Redis SELECT failed: " + select.string);
           close_unlocked();
           return false;
         }
       }
     } catch (const std::exception& ex) {
-      error = ex.what();
+      set_error(ex.what());
       close_unlocked();
       return false;
     }
@@ -360,25 +408,28 @@ struct Client::Impl {
 
   Reply command_unlocked(const std::vector<std::string>& arguments) {
     for (int attempt = 0; attempt < 2; ++attempt) {
-      if (socket == kInvalidSocket && !connect_unlocked()) {
+      if (io() == kInvalidSocket && !connect_unlocked()) {
         continue;
       }
       try {
         Reply reply = execute_raw_unlocked(arguments);
         if (reply.type == Reply::Type::Error) {
-          error = reply.string;
+          set_error(reply.string);
         } else {
-          error.clear();
+          set_error("");
         }
         return reply;
       } catch (const std::exception& ex) {
-        error = ex.what();
+        set_error(ex.what());
         close_unlocked();
       }
     }
     Reply reply;
     reply.type = Reply::Type::Error;
-    reply.string = error.empty() ? "Redis command failed" : error;
+    {
+      std::lock_guard<std::mutex> lock(error_mu);
+      reply.string = error.empty() ? "Redis command failed" : error;
+    }
     return reply;
   }
 };
@@ -388,13 +439,13 @@ Client::Client(RedisConfig config) : impl_(std::make_unique<Impl>(std::move(conf
 Client::~Client() = default;
 
 bool Client::ping() {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::Hold hold(*impl_);
   const Reply reply = impl_->command_unlocked({"PING"});
   return reply.type == Reply::Type::String && reply.string == "PONG";
 }
 
 std::optional<std::string> Client::get(const std::string& key) {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::Hold hold(*impl_);
   const Reply reply = impl_->command_unlocked({"GET", key});
   if (reply.type == Reply::Type::String) {
     return reply.string;
@@ -403,39 +454,39 @@ std::optional<std::string> Client::get(const std::string& key) {
 }
 
 bool Client::set_ex(const std::string& key, const std::string& value, int ttl_seconds) {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::Hold hold(*impl_);
   const Reply reply =
       impl_->command_unlocked({"SET", key, value, "EX", std::to_string(ttl_seconds)});
   return reply.type == Reply::Type::String && reply.string == "OK";
 }
 
 bool Client::set_nx_ex(const std::string& key, const std::string& value, int ttl_seconds) {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::Hold hold(*impl_);
   const Reply reply =
       impl_->command_unlocked({"SET", key, value, "NX", "EX", std::to_string(ttl_seconds)});
   return reply.type == Reply::Type::String && reply.string == "OK";
 }
 
 bool Client::del(const std::string& key) {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::Hold hold(*impl_);
   const Reply reply = impl_->command_unlocked({"DEL", key});
   return reply.type == Reply::Type::Integer;
 }
 
 bool Client::zadd(const std::string& key, int64_t score, const std::string& member) {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::Hold hold(*impl_);
   const Reply reply = impl_->command_unlocked({"ZADD", key, std::to_string(score), member});
   return reply.type == Reply::Type::Integer;
 }
 
 bool Client::zrem(const std::string& key, const std::string& member) {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::Hold hold(*impl_);
   const Reply reply = impl_->command_unlocked({"ZREM", key, member});
   return reply.type == Reply::Type::Integer && reply.integer > 0;
 }
 
 bool Client::zremrangebyscore(const std::string& key, int64_t min_score, int64_t max_score) {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::Hold hold(*impl_);
   const Reply reply = impl_->command_unlocked(
       {"ZREMRANGEBYSCORE", key, std::to_string(min_score), std::to_string(max_score)});
   return reply.type == Reply::Type::Integer;
@@ -443,7 +494,7 @@ bool Client::zremrangebyscore(const std::string& key, int64_t min_score, int64_t
 
 std::vector<std::string> Client::zrangebyscore(const std::string& key, int64_t min_score,
                                                const std::string& max_score) {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::Hold hold(*impl_);
   const Reply reply = impl_->command_unlocked(
       {"ZRANGEBYSCORE", key, std::to_string(min_score), max_score});
   std::vector<std::string> values;
@@ -460,7 +511,10 @@ std::vector<std::string> Client::zrangebyscore(const std::string& key, int64_t m
 }
 
 const std::string& Client::last_error() const {
-  return impl_->error;
+  thread_local std::string copy;
+  std::lock_guard<std::mutex> lock(impl_->error_mu);
+  copy = impl_->error;
+  return copy;
 }
 
 }  // namespace jh::redis

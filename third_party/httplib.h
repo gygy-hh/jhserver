@@ -114,7 +114,7 @@
 #endif
 
 #ifndef CPPHTTPLIB_LISTEN_BACKLOG
-#define CPPHTTPLIB_LISTEN_BACKLOG 5
+#define CPPHTTPLIB_LISTEN_BACKLOG 4096
 #endif
 
 /*
@@ -909,6 +909,8 @@ public:
   int bind_to_any_port(const std::string &host, int socket_flags = 0);
   bool listen_after_bind();
 
+  virtual bool process_and_close_socket(socket_t sock);
+
   bool listen(const std::string &host, int port, int socket_flags = 0);
 
   bool is_running() const;
@@ -916,6 +918,19 @@ public:
   void stop();
 
   std::function<TaskQueue *(void)> new_task_queue;
+
+  // 返回 true 表示调用方已接管 sock，本线程不再读请求、也不关闭它。
+  // 用来把慢请求转到另一组线程。只在 process_and_close_socket 入口调用一次。
+  std::function<bool(socket_t sock)> socket_handoff;
+
+  // accept 之后、进入工作队列之前。返回 false 时本连接被直接关闭，不占工作线程。
+  std::function<bool(socket_t sock)> socket_starting;
+  // 连接真正处理结束（含转入慢线程之后的那一次）时调用，用来归还名额。
+  std::function<void(socket_t sock)> socket_finished;
+
+  // 接手连接之后、开始读请求之前调用，可按线程改 keep-alive 次数和空闲秒数。
+  std::function<void(size_t &keep_alive_max_count, time_t &keep_alive_timeout_sec)>
+      keep_alive_adjust;
 
 protected:
   bool process_request(Stream &strm, bool close_connection,
@@ -981,8 +996,6 @@ private:
                          ContentReceiver receiver,
                          MultipartContentHeader multipart_header,
                          ContentReceiver multipart_receiver) const;
-
-  virtual bool process_and_close_socket(socket_t sock);
 
   std::atomic<bool> is_running_{false};
   std::atomic<bool> done_{false};
@@ -6433,8 +6446,28 @@ inline bool Server::listen_internal() {
 #endif
       }
 
+      if (socket_starting && !socket_starting(sock)) {
+        detail::shutdown_socket(sock);
+        detail::close_socket(sock);
+        continue;
+      }
+
       if (!task_queue->enqueue(
               [this, sock]() { process_and_close_socket(sock); })) {
+        if (socket_finished) { socket_finished(sock); }
+        static constexpr char kOverloaded[] =
+            "HTTP/1.1 503 Service Unavailable\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 22\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "{\"error\":\"overloaded\"}";
+#ifdef _WIN32
+        ::send(sock, kOverloaded,
+               static_cast<int>(sizeof(kOverloaded) - 1), 0);
+#else
+        ::send(sock, kOverloaded, sizeof(kOverloaded) - 1, MSG_NOSIGNAL);
+#endif
         detail::shutdown_socket(sock);
         detail::close_socket(sock);
       }
@@ -6806,8 +6839,14 @@ Server::process_request(Stream &strm, bool close_connection,
 inline bool Server::is_valid() const { return true; }
 
 inline bool Server::process_and_close_socket(socket_t sock) {
+  if (socket_handoff && socket_handoff(sock)) { return true; }
+
+  size_t keep_alive_max = keep_alive_max_count_;
+  time_t keep_alive_sec = keep_alive_timeout_sec_;
+  if (keep_alive_adjust) { keep_alive_adjust(keep_alive_max, keep_alive_sec); }
+
   auto ret = detail::process_server_socket(
-      svr_sock_, sock, keep_alive_max_count_, keep_alive_timeout_sec_,
+      svr_sock_, sock, keep_alive_max, keep_alive_sec,
       read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
       write_timeout_usec_,
       [this](Stream &strm, bool close_connection, bool &connection_closed) {
@@ -6815,6 +6854,8 @@ inline bool Server::process_and_close_socket(socket_t sock) {
                                nullptr);
       });
 
+  // 先归还名额再关闭。关掉之后 getpeername 就拿不到对端地址了。
+  if (socket_finished) { socket_finished(sock); }
   detail::shutdown_socket(sock);
   detail::close_socket(sock);
   return ret;

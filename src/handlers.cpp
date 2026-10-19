@@ -1,6 +1,8 @@
 #include "jh/handlers.hpp"
 
 #include "jh/auth.hpp"
+#include "jh/gateway.hpp"
+#include "jh/lunjian.hpp"
 #include "jh/cache.hpp"
 #include "jh/crypto.hpp"
 #include "jh/mail.hpp"
@@ -392,8 +394,8 @@ std::string enforce_bl_policy(const std::string& blob, const std::string& acc, i
   return updated;
 }
 
-bool requires_session(const std::string& action) {
-  return action == "getInitData" || action == "changePassword";
+bool requires_session(const std::string& /*action*/) {
+  return false;
 }
 
 bool bind_session_identity(json& req, std::string& error) {
@@ -450,8 +452,6 @@ json handle_get_init_data(const json& req, int /*ver*/, const std::string& chann
   if (area > kMaxSaveArea) {
     return api_err("invalid area");
   }
-  std::cerr << "[getInitData] channel=" << channel << " acc=" << acc << " area=" << area
-            << std::endl;
   const int prog_ver = req.value("prog_ver", req.value("program_version", 0));
   const int json_ver = req.value("json_ver", 0);
   const int asset_ver = req.value("asset_ver", 0);
@@ -586,7 +586,7 @@ json handle_change_password(const json& req) {
   const std::string old_psw = req.value("old_psw", "");
   const std::string new_psw = req.value("new_psw", "");
   if (acc.empty()) {
-    return api_err("session required", 401);
+    return api_err("acc required");
   }
   if (old_psw.empty()) {
     return api_err("old password required");
@@ -768,13 +768,15 @@ json dispatch(const RequestCtx& ctx, const json& req) {
   if (ctx.action == "mail") {
     return handle_mail(req);
   }
+  if (auto lunjian_resp = lunjian::handle(ctx.action, req, ctx.channel)) {
+    return *lunjian_resp;
+  }
   return handle_stub(req);
 }
 
 void handle_post(const httplib::Request& req, httplib::Response& res, const ServerConfig& config) {
   RequestCtx ctx{&config, extract_action(req)};
   res.status = 200;
-  std::cerr << "[http] " << req.method << " " << req.path << " body=" << req.body.size() << std::endl << std::flush;
   if (!parse_query(req, ctx)) {
     res.set_content(make_error(1, "bad ver"), "application/json; charset=utf-8");
     return;
@@ -828,13 +830,8 @@ void handle_post(const httplib::Request& req, httplib::Response& res, const Serv
 
 }  // namespace
 
-void register_routes(httplib::Server& server, const ServerConfig& config) {
+void register_routes(gateway::Router& server, const ServerConfig& config) {
   server.Post(R"(/.+)", [&config](const httplib::Request& req, httplib::Response& res) {
-    if (req.path.rfind("/admin", 0) == 0) {
-      res.status = 404;
-      res.set_content(R"({"code":1,"msg":"not found"})", "application/json; charset=utf-8");
-      return;
-    }
     handle_post(req, res, config);
   });
 

@@ -11,6 +11,10 @@
 
 #include <nlohmann/json.hpp>
 
+namespace jh::gateway {
+class Router;
+}
+
 namespace jh::update {
 
 struct Manifest {
@@ -57,7 +61,7 @@ std::vector<std::string> list_json_files();
 std::vector<std::string> list_asset_files();
 std::vector<std::string> list_apk_files();
 
-void register_routes(httplib::Server& server, const ServerConfig& config);
-void register_admin_routes(httplib::Server& server, const ServerConfig& config);
+void register_routes(gateway::Router& server, const ServerConfig& config);
+void register_admin_routes(gateway::Router& server, const ServerConfig& config);
 
 }  // namespace jh::update

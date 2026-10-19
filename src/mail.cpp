@@ -218,6 +218,7 @@ std::optional<GlobalMailSchedule> parse_schedule(const json& value) {
 void scheduler_loop() {
   while (!g_scheduler.stop.load()) {
     if (g_redis) {
+      cleanup_expired_index();
       const int64_t now = static_cast<int64_t>(std::time(nullptr));
       const auto due = g_redis->zrangebyscore(kGlobalScheduleIndex, 0, std::to_string(now));
       for (const auto& raw : due) {
@@ -332,7 +333,6 @@ std::optional<json> get_huo_dong(const std::string& channel, const std::string& 
   const std::string key = mail_key(channel, acc, area);
   const auto value = g_redis->get(key);
   if (!value) {
-    remove_index_member(key);
     return std::nullopt;
   }
   try {
@@ -357,7 +357,6 @@ std::optional<json> get_global_huo_dong(const std::string& channel) {
   const std::string key = global_mail_key(channel);
   const auto value = g_redis->get(key);
   if (!value) {
-    g_redis->zrem(kGlobalMailIndex, key);
     return std::nullopt;
   }
   try {
