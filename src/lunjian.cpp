@@ -32,9 +32,12 @@ namespace {
 using json = nlohmann::json;
 
 constexpr int kDefaultTimes = 25;
-// 暂时取消每日挑战次数限制；仍回写一个较大的展示值，避免原版 UI 按 0 拦截匹配。
-constexpr int kUnlimitedTimes = 999;
-constexpr int kNpcCount = 20;
+constexpr const char* kNpcNicks[] = {
+    "琳琅斌", "蒺藜",       "云壤",   "明月共此时", "逍遥行", "穗穗",     "忘川",
+    "天涯照月", "凤雨天蚀", "云烟飘渺", "十年不出武穆", "读博财富自由", "九刀下天山", "李清月",
+    "萧暮雨", "忘绝情",   "慕容莹儿", "酒已烈",   "山水依在", "一日之寒",   "岁月落柏",
+};
+constexpr int kNpcCount = static_cast<int>(sizeof(kNpcNicks) / sizeof(kNpcNicks[0]));
 constexpr int kMaxTeam = 5;
 constexpr int64_t kFreshSec = 3LL * 24 * 60 * 60;
 constexpr int kFightLevel = 90;
@@ -119,7 +122,7 @@ std::string clip_nick(std::string nick) {
   return nick.empty() ? "论剑客" : nick;
 }
 
-// 排行榜/匹配展示用：不影响 fight_data 阵容。AI 固定映射到人机01-20 + 稳定的主角头像。
+// 排行榜/匹配展示用：不影响 fight_data 阵容。名字按人机序号取，头像只在主角里抽。
 uint32_t display_hash(const std::string& text) {
   uint32_t h = 2166136261u;
   for (const unsigned char ch : text) {
@@ -129,16 +132,36 @@ uint32_t display_hash(const std::string& text) {
   return h;
 }
 
+int npc_slot_of(const std::string& account) {
+  const auto pos = account.rfind(':');
+  if (pos == std::string::npos || pos + 1 >= account.size()) {
+    return -1;
+  }
+  int index = 0;
+  for (size_t i = pos + 1; i < account.size(); ++i) {
+    const char ch = account[i];
+    if (ch < '0' || ch > '9') {
+      return -1;
+    }
+    index = index * 10 + (ch - '0');
+    if (index >= 1000) {
+      return -1;
+    }
+  }
+  return index;
+}
+
 std::string ai_display_nick(const std::string& account) {
-  const unsigned idx = 1u + (display_hash(account) % 20u);
-  char buf[16];
-  std::snprintf(buf, sizeof(buf), "人机%02u", idx);
-  return buf;
+  int index = npc_slot_of(account);
+  if (index < 0 || index >= kNpcCount) {
+    index = static_cast<int>(display_hash(account) % static_cast<unsigned>(kNpcCount));
+  }
+  return kNpcNicks[index];
 }
 
 int ai_display_head(const std::string& account) {
-  // 可选主角/可上场人物头像 id，仅用于排行榜展示。
-  static constexpr int kHeads[] = {101, 102, 103, 104, 105, 201, 202, 203, 208, 280, 282, 283, 284, 285, 286, 912};
+  // 创角主角：男性 101-105，女性 121-125。同一人机每次看到的头像不变。
+  static constexpr int kHeads[] = {101, 102, 103, 104, 105, 121, 122, 123, 124, 125};
   return kHeads[display_hash(account + "#head") % (sizeof(kHeads) / sizeof(kHeads[0]))];
 }
 
@@ -182,37 +205,110 @@ int json_role_id(const json& doc, const char* key) {
   return 0;
 }
 
-SaveIdentity identity_from_save(const std::string& account, int area) {
-  const std::string key = account + "#" + std::to_string(area);
-  if (const auto it = g_save_identity.find(key); it != g_save_identity.end()) {
-    return it->second;
-  }
-  SaveIdentity identity;
+void fill_identity_from_area(const std::string& account, int area, SaveIdentity& identity) {
   if (const auto meta = storage::get_save_meta(account, area)) {
     const std::string username = trim_copy(meta->username);
-    if (!username.empty() && username != account) {
+    if (identity.nick.empty() && !username.empty() && username != account) {
       identity.nick = username;
     }
+  }
+  if (!identity.nick.empty() && identity.head > 0) {
+    return;
   }
   if (const auto blob = storage::load_cloud(account, area)) {
     if (const auto cipher = save_blob::get_segment(*blob, "dat.json");
         cipher && !cipher->empty() && *cipher != "null") {
       try {
         const json doc = json::parse(save_crypto::decrypt_dat_auto(*cipher, area, nullptr));
-        if (doc.contains("mainNick") && doc["mainNick"].is_string()) {
+        if (identity.nick.empty() && doc.contains("mainNick") && doc["mainNick"].is_string()) {
           const std::string nick = trim_copy(doc["mainNick"].get<std::string>());
           if (!nick.empty() && nick != account) {
             identity.nick = nick;
           }
         }
-        const int head = json_role_id(doc, "mainRole");
-        if (head > 0) {
-          identity.head = head;
+        if (identity.head <= 0) {
+          const int head = json_role_id(doc, "mainRole");
+          if (head > 0) {
+            identity.head = head;
+          }
         }
       } catch (const std::exception& ex) {
         std::cerr << "[lunjian] save identity skipped acc=" << account << " area=" << area << " " << ex.what()
                   << std::endl;
       }
+    }
+  }
+}
+
+int head_from_fight_blob(const std::string& blob) {
+  if (blob.empty()) {
+    return 0;
+  }
+  const json fight = json::parse(blob, nullptr, false);
+  if (!fight.is_object()) {
+    return 0;
+  }
+  const auto& players = fight.contains("players") ? fight["players"] : json::array();
+  if (!players.is_array() || players.empty() || !players[0].is_object()) {
+    return 0;
+  }
+  return players[0].value("head", 0);
+}
+
+int head_from_loadout_blob(const std::string& text) {
+  if (text.empty()) {
+    return 0;
+  }
+  const json body = json::parse(text, nullptr, false);
+  if (!body.is_object() || !body.contains("chars") || !body["chars"].is_array() || body["chars"].empty()) {
+    return 0;
+  }
+  const auto& first = body["chars"][0];
+  if (first.is_number_integer()) {
+    return first.get<int>();
+  }
+  if (first.is_number()) {
+    return static_cast<int>(first.get<double>());
+  }
+  return 0;
+}
+
+SaveIdentity identity_from_save(const std::string& account, int area) {
+  const std::string key = account + "#" + std::to_string(area);
+  if (const auto it = g_save_identity.find(key); it != g_save_identity.end()) {
+    return it->second;
+  }
+  SaveIdentity identity;
+  fill_identity_from_area(account, area, identity);
+  // 当前存档被删/未上传时，用同账号其它存档补昵称和头像。
+  if (identity.nick.empty() || identity.head <= 0) {
+    int64_t best_ts = -1;
+    SaveIdentity sibling;
+    for (int other = 1; other <= 66; ++other) {
+      if (other == area) {
+        continue;
+      }
+      const auto meta = storage::get_save_meta(account, other);
+      if (!meta) {
+        continue;
+      }
+      const int64_t ts = std::max(meta->manual_upload_at, meta->save_time);
+      if (ts < best_ts) {
+        continue;
+      }
+      SaveIdentity candidate;
+      fill_identity_from_area(account, other, candidate);
+      if (candidate.nick.empty() && candidate.head <= 0) {
+        continue;
+      }
+      best_ts = ts;
+      sibling = std::move(candidate);
+    }
+    if (identity.nick.empty() && !sibling.nick.empty()) {
+      identity.nick = sibling.nick;
+    }
+    if (identity.head <= 0 && sibling.head > 0) {
+      identity.head = sibling.head;
     }
   }
   if (!identity.nick.empty() || identity.head > 0) {
@@ -239,8 +335,14 @@ void apply_display_identity(Fighter& fighter) {
   if (nick_bad && !identity.nick.empty()) {
     fighter.nick = identity.nick;
   }
-  if (head_bad && identity.head > 0) {
-    fighter.head = identity.head;
+  if (head_bad) {
+    if (identity.head > 0) {
+      fighter.head = identity.head;
+    } else if (const int from_fight = head_from_fight_blob(fighter.fight_data); from_fight > 0) {
+      fighter.head = from_fight;
+    } else if (const int from_loadout = head_from_loadout_blob(fighter.loadout_json); from_loadout > 0) {
+      fighter.head = from_loadout;
+    }
   }
 }
 
@@ -806,19 +908,60 @@ int pick_id(const std::vector<PoolItem>& items, std::mt19937& rng) {
   return items[rng() % items.size()].id;
 }
 
+bool fight_needs_rebuild(const json& fight);
+
+bool npc_uses_current_pool(const std::string& blob) {
+  const json fight = json::parse(blob, nullptr, false);
+  if (fight_needs_rebuild(fight)) {
+    return false;
+  }
+  auto equipped = [](const json& list) {
+    if (!list.is_array() || list.empty()) {
+      return false;
+    }
+    for (const auto& player : list) {
+      if (!player.is_object() || !player.contains("equip") || !player["equip"].is_array() || player["equip"].empty()) {
+        return false;
+      }
+      for (const auto& equip : player["equip"]) {
+        const int eid = equip.is_object() ? equip.value("eid", 0) : 0;
+        if (eid <= 0 || find_item(g_pool.equips, eid) == nullptr) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+  return equipped(fight.value("players", json::array()));
+}
+
 void ensure_npcs(const std::string& channel) {
-  const std::string ver_mark = "%\"ljVer\":" + std::to_string(kFightDataVer) + "%";
-  const auto rows = db_query("SELECT COUNT(*) FROM lunjian_fighter WHERE channel=" + q(channel) +
-                             " AND week_id=" + std::to_string(g_pool.week_id) + " AND is_npc=1 AND fight_data LIKE " +
-                             q(ver_mark));
-  if (!rows.empty() && cell_int(rows[0], 0) >= kNpcCount) {
+  const auto rows = db_query("SELECT account, fight_data FROM lunjian_fighter WHERE channel=" + q(channel) +
+                             " AND week_id=" + std::to_string(g_pool.week_id) + " AND is_npc=1");
+  bool pool_ok = !rows.empty();
+  std::unordered_set<int> have;
+  for (const auto& row : rows) {
+    const int index = npc_slot_of(row.empty() ? "" : row[0]);
+    if (index >= 0 && index < kNpcCount) {
+      have.insert(index);
+    }
+    const std::string blob = row.size() > 1 ? row[1] : "";
+    if (blob.empty() || !npc_uses_current_pool(blob)) {
+      pool_ok = false;
+    }
+  }
+  bool complete = pool_ok;
+  if (complete) {
+    for (int i = 0; i < kNpcCount; ++i) {
+      if (!have.count(i)) {
+        complete = false;
+        break;
+      }
+    }
+  }
+  if (complete) {
     return;
   }
-  // 重建 NPC 时清空本期真人排行，避免旧阵容/旧战力残留。
-  db_exec("DELETE FROM lunjian_fighter WHERE channel=" + q(channel) +
-          " AND week_id=" + std::to_string(g_pool.week_id) + " AND is_npc=0");
-  db_exec("DELETE FROM lunjian_fighter WHERE channel=" + q(channel) +
-          " AND week_id=" + std::to_string(g_pool.week_id) + " AND is_npc=1");
   std::array<std::vector<int>, kEquipSlots> slot_pool;
   for (const auto& item : g_pool.equips) {
     if (const int slot = equip_slot(item.id); slot >= 0) {
@@ -827,12 +970,11 @@ void ensure_npcs(const std::string& channel) {
   }
   std::mt19937 rng(static_cast<std::mt19937::result_type>(
       static_cast<uint64_t>(g_pool.week_id) ^ (0x4E5Cu * static_cast<uint64_t>(kFightDataVer))));
-  struct Built {
-    Fighter fighter;
-  };
-  std::vector<Built> built;
-  built.reserve(kNpcCount);
-  for (int i = 0; i < kNpcCount; ++i) {
+  auto build_one = [&](int i) {
+    if (pool_ok) {
+      rng.seed(static_cast<std::mt19937::result_type>(
+          static_cast<uint64_t>(g_pool.week_id) ^ (0xA11u * static_cast<uint64_t>(i + 1))));
+    }
     std::vector<int> chars;
     for (const auto& item : g_pool.chars) {
       chars.push_back(item.id);
@@ -884,7 +1026,34 @@ void ensure_npcs(const std::string& channel) {
     fighter.times_left = 0;
     fighter.times_day = day_id(fighter.utime);
     apply_display_identity(fighter);
-    built.push_back(Built{std::move(fighter)});
+    return fighter;
+  };
+  if (pool_ok) {
+    bool added = false;
+    for (int i = 0; i < kNpcCount; ++i) {
+      if (have.count(i)) {
+        continue;
+      }
+      Fighter fighter = build_one(i);
+      fighter.score = 6 + i * 3;
+      save_fighter(channel, fighter, g_pool.week_id);
+      added = true;
+    }
+    if (added) {
+      bump_ver(channel);
+    }
+    return;
+  }
+  // 阵容不在本期池里时才整批重建。真人积分和阵容留在本期。
+  db_exec("DELETE FROM lunjian_fighter WHERE channel=" + q(channel) +
+          " AND week_id=" + std::to_string(g_pool.week_id) + " AND is_npc=1");
+  struct Built {
+    Fighter fighter;
+  };
+  std::vector<Built> built;
+  built.reserve(kNpcCount);
+  for (int i = 0; i < kNpcCount; ++i) {
+    built.push_back(Built{build_one(i)});
   }
   std::sort(built.begin(), built.end(),
             [](const Built& a, const Built& b) { return a.fighter.fight_power < b.fighter.fight_power; });
@@ -1078,7 +1247,7 @@ json base_board(const Fighter& me, const std::string& channel) {
               {"msg", "华山论剑每周一凌晨4点轮换人物、装备、内功和武功"},
               {"ver", ver_of(channel)},
               {"myJiFen", me.score},
-              {"myBattleTimes", kUnlimitedTimes},
+              {"myBattleTimes", me.times_left},
               {"fp_need", 0},
               {"point_need", 0},
               {"beginAt", format_cst(g_pool.begin_unix)},
@@ -1124,8 +1293,9 @@ void repair_fighter_loadout(const std::string& channel, Fighter& me) {
 }
 
 int repair_human_identities(const std::string& channel) {
-  const auto rows = db_query("SELECT account, area, nick, head FROM lunjian_fighter WHERE channel=" + q(channel) +
-                             " AND week_id=" + std::to_string(g_pool.week_id) + " AND is_npc=0");
+  const auto rows = db_query(
+      "SELECT account, area, nick, head, fight_data, loadout_json FROM lunjian_fighter WHERE channel=" + q(channel) +
+      " AND week_id=" + std::to_string(g_pool.week_id) + " AND is_npc=0");
   int fixed = 0;
   for (const auto& row : rows) {
     Fighter shown;
@@ -1133,6 +1303,8 @@ int repair_human_identities(const std::string& channel) {
     shown.area = cell_int(row, 1);
     shown.nick = row.size() > 2 ? row[2] : "";
     shown.head = cell_int(row, 3);
+    shown.fight_data = row.size() > 4 ? row[4] : "";
+    shown.loadout_json = row.size() > 5 ? row[5] : "";
     const std::string old_nick = shown.nick;
     const int old_head = shown.head;
     apply_display_identity(shown);
@@ -1173,6 +1345,7 @@ json handle_top(const json& req, const std::string& channel) {
     shown.area = cell_int(row, 1);
     shown.nick = row.size() > 2 ? row[2] : "";
     shown.head = cell_int(row, 3);
+    shown.fight_data = row.size() > 6 ? row[6] : "";
     shown.is_npc = cell_int(row, 7) != 0;
     const std::string old_nick = shown.nick;
     const int old_head = shown.head;
@@ -1186,7 +1359,7 @@ json handle_top(const json& req, const std::string& channel) {
                            {"head", shown.head},
                            {"fightPower", cell_int(row, 4)},
                            {"lunJian", cell_int(row, 5)},
-                           {"fightData", current_fight_data(row.size() > 6 ? row[6] : "")}});
+                           {"fightData", current_fight_data(shown.fight_data)}});
   }
   response["results"] = results;
   return response;
@@ -1349,12 +1522,24 @@ json handle_upload(const json& req, const std::string& channel) {
   return json{{"code", 0}, {"msg", ""}, {"fightPower", me.fight_power}};
 }
 
-double sig_mod(int power, int max_power) {
-  if (max_power <= 0) {
-    return 0.5;
+// 积分榜名次：分数高靠前，同分比战力。返回 1 起。
+int fighter_rank(const std::string& channel, int score, int fight_power) {
+  const auto rows = db_query(
+      "SELECT COUNT(*) FROM lunjian_fighter WHERE channel=" + q(channel) + " AND week_id=" +
+      std::to_string(g_pool.week_id) + " AND (score>" + std::to_string(score) + " OR (score=" +
+      std::to_string(score) + " AND fight_power>" + std::to_string(fight_power) + "))");
+  return 1 + (rows.empty() ? 0 : cell_int(rows[0], 0));
+}
+
+// 排名差决定加分：打赢/打输更高名次得多分。
+// 赢 8~10，输 2~4。我名次更差（数字更大）说明对手更强 → 靠近上限。
+int score_delta_by_rank(bool win, int my_rank, int enemy_rank) {
+  const int diff = my_rank - enemy_rank;
+  const double t = 0.5 + 0.5 * std::tanh(static_cast<double>(diff) / 8.0);
+  if (win) {
+    return static_cast<int>(std::lround(8.0 + 2.0 * t));
   }
-  const double ratio = static_cast<double>(std::min(max_power, std::max(power, 0))) / static_cast<double>(max_power);
-  return 1.0 / (1.0 + std::exp(-10.0 * (ratio - 0.5)));
+  return static_cast<int>(std::lround(2.0 + 2.0 * t));
 }
 
 json handle_find(const json& req, const std::string& channel) {
@@ -1383,6 +1568,9 @@ json handle_find(const json& req, const std::string& channel) {
     std::cerr << "[lunjian] find reject empty loadout acc=" << account << " area=" << area
               << " loadout_len=" << me.loadout_json.size() << std::endl;
     return fail("请先从本期论剑池选择人物、武功和装备");
+  }
+  if (me.times_left <= 0) {
+    return fail("今日论剑次数已用完");
   }
 
   std::vector<Fighter> chosen_window;
@@ -1463,8 +1651,12 @@ json handle_find(const json& req, const std::string& channel) {
     return fail("对手阵容数据无效，请再试一次");
   }
   apply_display_identity(enemy);
-  // 每日次数限制已关闭：匹配不再校验/消耗次数。
-  // 客户端 onTiaoZhanCompleted 用 results 的首元素（*results）读 fightData/nick，必须是数组。
+  // 匹配成功即扣一次；客户端 onTiaoZhanCompleted 用 results 首元素读 fightData/nick。
+  me.times_left = std::max(0, me.times_left - 1);
+  db_exec("UPDATE lunjian_fighter SET times_left=" + std::to_string(me.times_left) +
+          ", times_day=" + std::to_string(me.times_day) + " WHERE channel=" + q(channel) +
+          " AND account=" + q(account) + " AND area=" + std::to_string(area) +
+          " AND week_id=" + std::to_string(g_pool.week_id));
   const json row = json{{"account", enemy.account},
                         {"acc", enemy.account},
                         {"nick", enemy.nick},
@@ -1475,8 +1667,8 @@ json handle_find(const json& req, const std::string& channel) {
                         {"lunJian", enemy.score},
                         {"fightData", enemy.fight_data}};
   std::cerr << "[lunjian] find ok acc=" << account << " area=" << area << " vs=" << enemy.account
-            << " fd=" << enemy.fight_data.size() << std::endl;
-  return json{{"code", 0}, {"myBattleTimes", kUnlimitedTimes}, {"results", json::array({row})}};
+            << " fd=" << enemy.fight_data.size() << " times=" << me.times_left << std::endl;
+  return json{{"code", 0}, {"myBattleTimes", me.times_left}, {"results", json::array({row})}};
 }
 
 json handle_end(const json& req, const std::string& channel) {
@@ -1488,10 +1680,11 @@ json handle_end(const json& req, const std::string& channel) {
   Fighter me = ensure_player(channel, account, area);
   const std::string enemy_acc = json_str(req, "eneAcc");
   const int enemy_area = json_int(req, "eneIndex", 1);
-  int enemy_power = 0;
+  int enemy_power = me.fight_power;
+  int enemy_score = me.score;
   std::string enemy_nick = json_str(req, "enemy");
   if (!enemy_acc.empty()) {
-    const auto rows = db_query("SELECT fight_power, nick FROM lunjian_fighter WHERE channel=" + q(channel) +
+    const auto rows = db_query("SELECT fight_power, nick, score FROM lunjian_fighter WHERE channel=" + q(channel) +
                                " AND account=" + q(enemy_acc) + " AND area=" + std::to_string(enemy_area) +
                                " AND week_id=" + std::to_string(g_pool.week_id) + " LIMIT 1");
     if (!rows.empty()) {
@@ -1499,41 +1692,33 @@ json handle_end(const json& req, const std::string& channel) {
       if (enemy_nick.empty()) {
         enemy_nick = rows[0][1];
       }
+      enemy_score = cell_int(rows[0], 2);
     }
   }
-  const auto max_rows = db_query("SELECT fight_power FROM lunjian_fighter WHERE channel=" + q(channel) +
-                                 " AND week_id=" + std::to_string(g_pool.week_id) + " ORDER BY fight_power DESC LIMIT 1");
-  const int max_power = max_rows.empty() ? std::max(enemy_power, 1) : std::max(cell_int(max_rows[0], 0), 1);
   const bool win = json_int(req, "br") == 2;
-  int delta = 0;
+  const int my_rank = fighter_rank(channel, me.score, me.fight_power);
+  const int enemy_rank = fighter_rank(channel, enemy_score, enemy_power);
+  const int delta = score_delta_by_rank(win, my_rank, enemy_rank);
   std::string msg;
   static const char* kWin[] = {"%s被你狠狠的暴揍了一顿,你得到了%d积分", "%s看形式不妙,仓皇而逃,积分+%d",
                                "你将%s打的跪地求饶,拿到积分%d", "%s还没反应过来就被你秒杀,积分+%d",
                                "你轻松碾压了%s,收获%d积分"};
-  static const char* kLose[] = {"你被%s狠狠教训了一顿,积分减少%d", "%s轻松击败了你,你损失了%d积分",
-                                "你拼尽全力也不敌%s,积分掉落%d", "面对%s你束手无策,失去了%d积分",
-                                "%s趁你不备偷袭成功,积分减少%d"};
+  static const char* kLose[] = {"你被%s狠狠教训了一顿,仍获得%d积分", "%s轻松击败了你,你拿到%d积分",
+                                "你拼尽全力也不敌%s,积分+%d", "面对%s你束手无策,仍收获%d积分",
+                                "%s趁你不备偷袭成功,你获得%d积分"};
   std::mt19937 rng(static_cast<unsigned>(now_unix()));
   if (enemy_nick.empty()) {
     enemy_nick = "对手";
   }
   char buf[160];
-  if (win) {
-    delta = static_cast<int>(std::lround(2.0 + 4.0 * sig_mod(enemy_power, max_power)));
-    std::snprintf(buf, sizeof(buf), kWin[rng() % 5], enemy_nick.c_str(), delta);
-  } else {
-    delta = 0;
-    std::snprintf(buf, sizeof(buf), kLose[rng() % 5], enemy_nick.c_str(), delta);
-  }
+  std::snprintf(buf, sizeof(buf), (win ? kWin : kLose)[rng() % 5], enemy_nick.c_str(), delta);
   msg = buf;
   me.score = std::max(0, me.score + delta);
   db_exec("UPDATE lunjian_fighter SET score=" + std::to_string(me.score) +
           " WHERE channel=" + q(channel) + " AND account=" + q(account) + " AND area=" +
           std::to_string(area) + " AND week_id=" + std::to_string(g_pool.week_id));
-  if (delta != 0) {
-    bump_ver(channel);
-  }
-  return json{{"code", 0}, {"msg", msg}, {"myJiFen", me.score}, {"myBattleTimes", kUnlimitedTimes}};
+  bump_ver(channel);
+  return json{{"code", 0}, {"msg", msg}, {"myJiFen", me.score}, {"myBattleTimes", me.times_left}};
 }
 
 }  // namespace
@@ -1555,6 +1740,13 @@ void init(const std::string& data_dir) {
               << " equips=" << g_pool.equips.size() << " grade=" << g_pool.equip_grade
               << " skills=" << g_pool.skills.size() << " grade=" << g_pool.skill_grade
               << " nei=" << g_pool.neis.size() << " grade=" << g_pool.nei_grade << "\n";
+    const auto channels = db_query("SELECT DISTINCT channel FROM lunjian_fighter");
+    for (const auto& row : channels) {
+      if (!row.empty() && !row[0].empty()) {
+        ensure_npcs(row[0]);
+        std::cerr << "[lunjian] npc loadout ready channel=" << row[0] << "\n";
+      }
+    }
   } catch (const std::exception& ex) {
     g_ready = false;
     g_error = ex.what();

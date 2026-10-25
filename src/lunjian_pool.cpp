@@ -16,6 +16,16 @@ constexpr int64_t kShiftSec = 4 * 60 * 60;
 constexpr int64_t kWeekSec = 7 * 24 * 60 * 60;
 constexpr int kCharCount = 12;
 constexpr int kFixedCharIds[] = {912, 201, 203, 91203, 202, 208, 283, 282, 280, 286, 285, 284};
+// 2026-10-19 04:00 至 2026-10-26 04:00。这一期武功、内功、装备按指定名单，不随机。
+constexpr int64_t kFirstPeriodWeekId = 20745;
+constexpr int kFirstPeriodSkillIds[] = {
+    3218, 3212, 3207, 3126, 202607176, 3134, 3013, 3029, 3015, 913103, 3214, 3204,
+    3213, 20260102, 3122, 3118, 202606191, 202605221, 202606064, 3024, 3028, 3203, 3103, 3003};
+constexpr int kFirstPeriodNeiIds[] = {3851, 3829, 3835, 202606054, 3808, 1157,
+                                      20260766, 202606196, 203801, 203800, 3000005, 3810};
+constexpr int kFirstPeriodEquipIds[] = {20265226, 20265312, 5118,     194002, 5310, 5820, 204006, 204004, 5413, 20265209,
+                                        204003,   20266202, 5819,     20265222, 204007, 5215, 20265213, 20265221, 5848,
+                                        5218};
 
 int min_star_of(const std::vector<CatItem>& items) {
   int star = 99;
@@ -91,6 +101,25 @@ std::vector<PoolItem> pick_category(const std::vector<CatItem>& items, std::mt19
     out.push_back(to_pool(plain[static_cast<size_t>(i)], false));
   }
   std::shuffle(out.begin(), out.end(), rng);
+  return out;
+}
+
+std::vector<PoolItem> pick_ids(const std::vector<CatItem>& items, const int* ids, int count) {
+  std::vector<PoolItem> out;
+  out.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    const CatItem* found = nullptr;
+    for (const auto& item : items) {
+      if (item.id == ids[i]) {
+        found = &item;
+        break;
+      }
+    }
+    if (!found) {
+      throw std::runtime_error("lunjian first period id missing " + std::to_string(ids[i]));
+    }
+    out.push_back(to_pool(*found, false));
+  }
   return out;
 }
 
@@ -256,9 +285,18 @@ WeekPool build_week_pool(const Catalog& catalog, int64_t week_id) {
   pool.week_id = week_id;
   week_bounds(week_id, pool.begin_unix, pool.end_unix);
   pool.chars = pick_chars(catalog.chars, char_rng);
-  pool.equips = pick_category(catalog.equips, equip_rng);
-  pool.skills = pick_category(catalog.skills, skill_rng);
-  pool.neis = pick_category(catalog.neis, nei_rng);
+  if (week_id == kFirstPeriodWeekId) {
+    pool.equips = pick_ids(catalog.equips, kFirstPeriodEquipIds,
+                           static_cast<int>(sizeof(kFirstPeriodEquipIds) / sizeof(kFirstPeriodEquipIds[0])));
+    pool.skills = pick_ids(catalog.skills, kFirstPeriodSkillIds,
+                           static_cast<int>(sizeof(kFirstPeriodSkillIds) / sizeof(kFirstPeriodSkillIds[0])));
+    pool.neis = pick_ids(catalog.neis, kFirstPeriodNeiIds,
+                         static_cast<int>(sizeof(kFirstPeriodNeiIds) / sizeof(kFirstPeriodNeiIds[0])));
+  } else {
+    pool.equips = pick_category(catalog.equips, equip_rng);
+    pool.skills = pick_category(catalog.skills, skill_rng);
+    pool.neis = pick_category(catalog.neis, nei_rng);
+  }
   pool.equip_grade = featured_grade(pool.equips);
   pool.skill_grade = featured_grade(pool.skills);
   pool.nei_grade = featured_grade(pool.neis);

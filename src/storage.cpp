@@ -13,6 +13,8 @@
 #include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <set>
+#include <system_error>
 
 namespace fs = std::filesystem;
 
@@ -24,11 +26,87 @@ constexpr size_t kSaveStripes = 16;
 std::mutex g_save_stripes[kSaveStripes];
 std::string g_data_dir;
 
+std::mutex g_bl_force_mu;
+std::set<std::string> g_bl_force;
+std::filesystem::file_time_type g_bl_force_mtime{};
+bool g_bl_force_loaded = false;
+
 std::mutex& save_stripe(const std::string& acc) {
   return g_save_stripes[std::hash<std::string>{}(acc) % kSaveStripes];
 }
 TtlCache<std::string, AccountAuthInfo> g_account_cache(100000);
 constexpr auto kAccountCacheTtl = std::chrono::minutes(10);
+
+std::string bl_force_path() {
+  return g_data_dir + "/bl_force.json";
+}
+
+void load_bl_force_unlocked(bool force_reload) {
+  const std::string path = bl_force_path();
+  std::error_code ec;
+  const bool exists = fs::exists(path, ec);
+  fs::file_time_type mtime{};
+  if (exists) {
+    mtime = fs::last_write_time(path, ec);
+  }
+  if (!force_reload && g_bl_force_loaded && exists && mtime == g_bl_force_mtime) {
+    return;
+  }
+  g_bl_force.clear();
+  g_bl_force_mtime = mtime;
+  g_bl_force_loaded = true;
+  if (!exists) {
+    return;
+  }
+  try {
+    std::ifstream in(path);
+    nlohmann::json j;
+    in >> j;
+    if (j.is_array()) {
+      for (const auto& item : j) {
+        if (item.is_string()) {
+          g_bl_force.insert(item.get<std::string>());
+        }
+      }
+    } else if (j.is_object() && j.contains("accounts") && j["accounts"].is_array()) {
+      for (const auto& item : j["accounts"]) {
+        if (item.is_string()) {
+          g_bl_force.insert(item.get<std::string>());
+        }
+      }
+    }
+  } catch (...) {
+    g_bl_force.clear();
+  }
+}
+
+bool persist_bl_force_unlocked() {
+  nlohmann::json arr = nlohmann::json::array();
+  for (const auto& acc : g_bl_force) {
+    arr.push_back(acc);
+  }
+  const std::string path = bl_force_path();
+  const std::string tmp = path + ".tmp";
+  {
+    std::ofstream out(tmp, std::ios::trunc);
+    if (!out) {
+      return false;
+    }
+    out << arr.dump(2);
+    out.flush();
+    if (!out) {
+      return false;
+    }
+  }
+  if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+    std::remove(tmp.c_str());
+    return false;
+  }
+  std::error_code ec;
+  g_bl_force_mtime = fs::last_write_time(path, ec);
+  g_bl_force_loaded = true;
+  return true;
+}
 
 std::string save_path(const std::string& acc, int area) {
   std::string safe = acc;
@@ -134,6 +212,36 @@ bool set_bl_exempt(const std::string& acc, bool exempt) {
   return changed;
 }
 
+bool is_bl_forced(const std::string& acc) {
+  std::lock_guard<std::mutex> lock(g_bl_force_mu);
+  load_bl_force_unlocked(false);
+  return g_bl_force.count(acc) > 0;
+}
+
+bool set_bl_forced(const std::string& acc, bool forced) {
+  if (acc.empty()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(g_bl_force_mu);
+  load_bl_force_unlocked(true);
+  const bool has = g_bl_force.count(acc) > 0;
+  if (forced == has) {
+    return true;
+  }
+  if (forced) {
+    g_bl_force.insert(acc);
+  } else {
+    g_bl_force.erase(acc);
+  }
+  return persist_bl_force_unlocked();
+}
+
+std::vector<std::string> list_bl_forced() {
+  std::lock_guard<std::mutex> lock(g_bl_force_mu);
+  load_bl_force_unlocked(false);
+  return {g_bl_force.begin(), g_bl_force.end()};
+}
+
 bool save_cloud(const std::string& acc, int area, const std::string& save_json, const SaveMeta& meta) {
   db_ensure_account(acc);
   std::lock_guard<std::mutex> lock(save_stripe(acc));
@@ -152,22 +260,34 @@ bool save_cloud(const std::string& acc, int area, const std::string& save_json, 
     }
   }
 
-  std::ofstream out(save_path(acc, area));
-  if (!out) {
+  // 先写临时文件再 rename：即使旧 meta 被 root 改坏属主，目录可写时仍能替换成功。
+  const std::string meta_path = save_path(acc, area);
+  const std::string meta_tmp = meta_path + ".tmp";
+  {
+    std::ofstream out(meta_tmp, std::ios::trunc);
+    if (!out) {
+      return false;
+    }
+    nlohmann::json wrapper{
+        {"updated_at", now},
+        {"username", meta.username},
+        {"lev", meta.lev},
+        {"save_time", save_time},
+        {"manual_upload_at", meta.manual_upload_at > 0 ? meta.manual_upload_at : now},
+        {"manual_download_at", meta.manual_download_at},
+        {"save_bytes", save_json.size()},
+    };
+    out << wrapper.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+    out.flush();
+    if (!out) {
+      return false;
+    }
+  }
+  if (std::rename(meta_tmp.c_str(), meta_path.c_str()) != 0) {
+    std::remove(meta_tmp.c_str());
     return false;
   }
-  nlohmann::json wrapper{
-      {"updated_at", now},
-      {"username", meta.username},
-      {"lev", meta.lev},
-      {"save_time", save_time},
-      {"manual_upload_at", meta.manual_upload_at > 0 ? meta.manual_upload_at : now},
-      {"manual_download_at", meta.manual_download_at},
-      {"save_bytes", save_json.size()},
-  };
-  out << wrapper.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-  out.flush();
-  return static_cast<bool>(out);
+  return true;
 }
 
 std::optional<SaveMeta> get_save_meta(const std::string& acc, int area) {

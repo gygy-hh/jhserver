@@ -6,11 +6,13 @@
 
 #include "jh/crypto.hpp"
 #include "jh/mail.hpp"
+#include "jh/save_blob.hpp"
 #include "jh/save_crypto.hpp"
 #include "jh/storage.hpp"
 #include "jh/update.hpp"
 
 #include <ctime>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -58,6 +60,71 @@ std::string format_size(size_t bytes) {
     return std::to_string(bytes / 1024) + " KB";
   }
   return std::to_string(bytes / (1024 * 1024)) + " MB";
+}
+
+// 管理端查看存档时，把 dat.json 解密成缩进后的 JSON。密钥与区服编号一致。
+std::string preview_dat_plain(const std::string& content, int area) {
+  if (content.empty() || content == "null") {
+    return content;
+  }
+  std::string plain = content;
+  const char head = content.front();
+  if (head != '{' && head != '[') {
+    try {
+      plain = save_crypto::decrypt_dat_auto(content, area, nullptr);
+    } catch (const std::exception& ex) {
+      return std::string("[dat.json 解密失败: ") + ex.what() + "]\n" + content;
+    }
+  }
+  try {
+    return nlohmann::ordered_json::parse(plain).dump(2);
+  } catch (...) {
+    return plain;
+  }
+}
+
+std::string preview_cloud_save(const std::string& blob, int area, bool* truncated) {
+  constexpr size_t kMaxPreview = 512 * 1024;
+  const auto segments = save_blob::parse(blob);
+  std::ostringstream oss;
+  auto write_segment = [&](const save_blob::SaveSegment& seg) {
+    if (oss.tellp() > 0) {
+      oss << "\n\n";
+    }
+    oss << seg.name << "\n";
+    if (seg.name == "dat.json") {
+      oss << preview_dat_plain(seg.content, area);
+    } else {
+      oss << seg.content;
+    }
+  };
+
+  bool has_dat = false;
+  for (const auto& seg : segments) {
+    if (seg.name == "dat.json") {
+      write_segment(seg);
+      has_dat = true;
+    }
+  }
+  for (const auto& seg : segments) {
+    if (seg.name != "dat.json") {
+      write_segment(seg);
+    }
+  }
+  if (!has_dat && segments.empty()) {
+    oss << blob;
+  }
+
+  std::string preview = oss.str();
+  const bool cut = preview.size() > kMaxPreview;
+  if (cut) {
+    preview.resize(kMaxPreview);
+    preview += "\n\n... [truncated] ...";
+  }
+  if (truncated) {
+    *truncated = cut;
+  }
+  return preview;
 }
 
 }  // namespace
@@ -140,15 +207,10 @@ void register_routes(gateway::Router& server, const ServerConfig& config) {
       res.set_content(R"({"error":"not found"})", "application/json; charset=utf-8");
       return;
     }
-    constexpr size_t kMaxPreview = 8000;
-    std::string preview = *save;
-    const bool truncated = preview.size() > kMaxPreview;
-    if (truncated) {
-      preview.resize(kMaxPreview);
-      preview += "\n\n... [truncated] ...";
-    }
+    bool truncated = false;
+    const std::string preview = preview_cloud_save(*save, area, &truncated);
     json j{{"acc", acc}, {"area", area}, {"size", save->size()}, {"preview", preview}, {"truncated", truncated}};
-    res.set_content(j.dump(), "application/json; charset=utf-8");
+    res.set_content(j.dump(-1, ' ', false, json::error_handler_t::replace), "application/json; charset=utf-8");
   });
 
   server.Delete("/admin/api/save", [](const httplib::Request& req, httplib::Response& res) {
@@ -259,6 +321,77 @@ void register_routes(gateway::Router& server, const ServerConfig& config) {
       return;
     }
     res.set_content(json{{"ok", true}, {"acc", acc}, {"bl_exempt", exempt}}.dump(),
+                    "application/json; charset=utf-8");
+  });
+
+  // 强制镇压：登记账号 + 给其全部云存档写入 bl=1
+  server.Post("/admin/api/account/bl-force", [](const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+      body = req.body.empty() ? json::object() : json::parse(req.body);
+    } catch (...) {
+      res.status = 400;
+      res.set_content(R"({"error":"invalid json"})", "application/json; charset=utf-8");
+      return;
+    }
+    const std::string acc = body.value("acc", "");
+    if (acc.empty() || !body.contains("forced") || !body["forced"].is_boolean()) {
+      res.status = 400;
+      res.set_content(R"({"error":"acc and forced required"})", "application/json; charset=utf-8");
+      return;
+    }
+    const bool forced = body["forced"].get<bool>();
+    if (!storage::set_bl_forced(acc, forced)) {
+      res.status = 500;
+      res.set_content(R"({"error":"failed to update bl_force"})", "application/json; charset=utf-8");
+      return;
+    }
+
+    json areas = json::array();
+    int applied = 0;
+    int failed = 0;
+    if (forced) {
+      for (const auto& save : storage::list_saves()) {
+        if (save.acc != acc || !save.has_blob) {
+          continue;
+        }
+        auto blob = storage::load_cloud(acc, save.area);
+        if (!blob) {
+          failed++;
+          areas.push_back({{"area", save.area}, {"ok", false}, {"error", "load failed"}});
+          continue;
+        }
+        try {
+          const std::string updated = save_blob::apply_bl(*blob, save.area);
+          storage::SaveMeta meta;
+          if (auto existing = storage::get_save_meta(acc, save.area)) {
+            meta = *existing;
+          } else {
+            meta.username = save.username.empty() ? acc : save.username;
+            meta.lev = save.lev;
+            meta.save_time = save.updated_at;
+          }
+          if (!storage::save_cloud(acc, save.area, updated, meta)) {
+            failed++;
+            areas.push_back({{"area", save.area}, {"ok", false}, {"error", "save failed"}});
+            continue;
+          }
+          applied++;
+          areas.push_back({{"area", save.area}, {"ok", true}, {"changed", updated.size() != blob->size()}});
+        } catch (const std::exception& ex) {
+          failed++;
+          areas.push_back({{"area", save.area}, {"ok", false}, {"error", ex.what()}});
+        }
+      }
+    }
+
+    res.set_content(json{{"ok", true},
+                         {"acc", acc},
+                         {"bl_forced", forced},
+                         {"applied", applied},
+                         {"failed", failed},
+                         {"areas", areas}}
+                        .dump(-1, ' ', false, json::error_handler_t::replace),
                     "application/json; charset=utf-8");
   });
 

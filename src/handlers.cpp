@@ -387,6 +387,13 @@ std::optional<int64_t> request_repair_version(const json& req) {
 }
 
 std::string enforce_bl_policy(const std::string& blob, const std::string& acc, int save_index, const char* where) {
+  if (storage::is_bl_forced(acc)) {
+    const std::string updated = save_blob::apply_bl(blob, save_index);
+    if (updated.size() != blob.size()) {
+      std::cerr << "[" << where << "] applied bl acc=" << acc << " area=" << save_index << std::endl;
+    }
+    return updated;
+  }
   const std::string updated = save_blob::strip_bl(blob, save_index);
   if (updated.size() != blob.size()) {
     std::cerr << "[" << where << "] stripped bl acc=" << acc << " area=" << save_index << std::endl;
@@ -464,8 +471,11 @@ json handle_get_init_data(const json& req, int /*ver*/, const std::string& chann
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   std::transform(server_apk_md5.begin(), server_apk_md5.end(), server_apk_md5.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  if (!storage::is_bl_exempt(acc) && server_apk_md5.size() == 32 &&
-      !client_apk_md5.empty()) {
+  if (storage::is_bl_forced(acc)) {
+    md5_suppressed = true;
+    std::cerr << "[getInitData] bl forced acc=" << acc << std::endl;
+  } else if (!storage::is_bl_exempt(acc) && server_apk_md5.size() == 32 &&
+             !client_apk_md5.empty()) {
     md5_suppressed = client_apk_md5 != server_apk_md5;
     if (md5_suppressed) {
       std::cerr << "[getInitData] apk md5 mismatch, bl=1 acc=" << acc

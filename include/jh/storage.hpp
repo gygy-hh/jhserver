@@ -57,6 +57,10 @@ std::optional<AccountRecord> create_account_with_password(const std::string& acc
 bool set_account_password(const std::string& acc, const std::string& salt, const std::string& hash);
 bool is_bl_exempt(const std::string& acc);
 bool set_bl_exempt(const std::string& acc, bool exempt);
+// 管理端强制镇压：getInitData 下发 bl，上传/下载保留/写入存档 bl
+bool is_bl_forced(const std::string& acc);
+bool set_bl_forced(const std::string& acc, bool forced);
+std::vector<std::string> list_bl_forced();
 std::vector<AccountRecord> list_accounts();
 std::vector<AccountAuthInfo> list_accounts_auth();
 

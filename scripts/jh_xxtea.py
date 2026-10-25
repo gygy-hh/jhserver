@@ -146,6 +146,21 @@ def override_key(save_index: int) -> bytes | None:
     return val[:16].encode("ascii") if val else None
 
 
+def _key_for_mode(mode: str, save_index: int) -> bytes:
+    if mode == "override":
+        key = override_key(save_index)
+        if key is None:
+            raise ValueError("override key missing")
+        return key
+    if mode == "new2":
+        return derive_new2(save_index)
+    if mode == "papa":
+        return derive_papa(save_index)
+    if mode == "legacy":
+        return LEGACY_KEY
+    raise ValueError(f"unknown dat key mode: {mode}")
+
+
 def decrypt_dat(cipher_b64: str, save_index: int) -> tuple[str, str]:
     """返回 (使用的密钥模式, dat.json 明文)。"""
     raw = base64.b64decode(cipher_b64)
@@ -167,6 +182,12 @@ def decrypt_dat(cipher_b64: str, save_index: int) -> tuple[str, str]:
     raise ValueError("dat.json decrypt failed")
 
 
+def encrypt_dat(plain: str, save_index: int, mode: str) -> str:
+    """按指定模式加密 dat.json 明文，返回 base64 密文。"""
+    raw = xxtea_encrypt(plain.encode("utf-8"), _key_for_mode(mode, save_index))
+    return base64.b64encode(raw).decode("ascii")
+
+
 def split_blob(blob: str) -> list[str]:
     return blob.split("____")
 
@@ -174,3 +195,24 @@ def split_blob(blob: str) -> list[str]:
 def get_dat_cipher(blob: str) -> str:
     parts = split_blob(blob)
     return parts[parts.index("dat.json") + 1]
+
+
+def set_dat_cipher(blob: str, cipher_b64: str) -> str:
+    parts = split_blob(blob)
+    idx = parts.index("dat.json")
+    parts[idx + 1] = cipher_b64
+    return "____".join(parts)
+
+
+def apply_bl(blob: str, save_index: int) -> tuple[str, bool]:
+    """写入 dat.json 的 bl=1。返回 (新 blob, 是否有改动)。"""
+    mode, plain = decrypt_dat(get_dat_cipher(blob), save_index)
+    doc = json.loads(plain)
+    if not isinstance(doc, dict):
+        raise ValueError("dat.json is not an object")
+    if "bl" in doc:
+        return blob, False
+    doc["bl"] = 1
+    # 保持原有键序，仅追加 bl
+    cipher = encrypt_dat(json.dumps(doc, ensure_ascii=False, separators=(",", ":")), save_index, mode)
+    return set_dat_cipher(blob, cipher), True

@@ -52,3 +52,8 @@ libcocos2dcpp.lst
 exam-decoded/
 migration-backups/
 tools/apktool*.jar
+
+# Local scratch / agent memory
+tmp/
+.workbuddy/
+data/bl_force.json
