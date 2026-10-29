@@ -24,6 +24,10 @@ struct RedisConfig {
 struct ServerConfig {
   std::string host = "0.0.0.0";
   int port = 8888;
+  // 注入 SO 长连接推送端口；0 关闭。
+  int push_port = 18081;
+  // 推送并发连接上限（每连接一个线程，须低于 systemd TasksMax 减去 HTTP 线程池）。
+  int push_max_conns = 1500;
   int game_version = 478;
   std::string plat = "ANDR";
   std::string data_dir = "data";

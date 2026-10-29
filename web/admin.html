@@ -69,6 +69,7 @@ body.request-busy header,body.request-busy .wrap{filter:brightness(.72);transiti
     <button class="tab" data-tab="saves">云存档</button>
     <button class="tab" data-tab="mails">邮件</button>
     <button class="tab" data-tab="update">在线更新</button>
+    <button class="tab" data-tab="push">长连接推送</button>
     <button class="tab" data-tab="config">服务配置</button>
   </div>
   <div class="msg" id="msg"></div>
@@ -199,6 +200,20 @@ body.request-busy header,body.request-busy .wrap{filter:brightness(.72);transiti
       <pre id="updateUrls" style="margin-top:12px;font-size:12px"></pre>
     </div>
   </div>
+  <div class="panel" id="panel-push">
+    <div class="card" style="margin-bottom:16px">
+      <strong>长连接推送（首期连通性）</strong>
+      <p class="hint">注入 SO 登录后连独立 TCP 端口（默认 18081）。此处可查看在线账号并发送一条测试推送。</p>
+      <div class="form-row">
+        <label>账号<input id="pushAcc" placeholder="玩家账号"></label>
+        <label style="flex:1">消息<input id="pushMsg" value="hello"></label>
+        <button class="btn btn-primary" id="btnPushSend">发送推送</button>
+        <button class="btn btn-primary" id="btnRefreshPush">刷新在线</button>
+      </div>
+      <p class="hint" id="pushStatus">在线：-</p>
+    </div>
+    <table><thead><tr><th>账号</th><th>昵称</th><th>地图</th><th>坐标</th><th>对端 IP</th><th>连上时间</th><th>最后活跃</th></tr></thead><tbody id="pushOnlineBody"></tbody></table>
+  </div>
   <div class="panel" id="panel-config"><div class="card" id="configBox"></div></div>
 </div>
 <div class="modal" id="modal"><div class="modal-box">
@@ -287,7 +302,8 @@ async function loadStats() {
     ['账号数', data.account_count],
     ['存档数', data.save_count],
     ['版本 ver', data.game_version],
-    ['端口', data.port]
+    ['HTTP 端口', data.port],
+    ['推送在线', data.push_online || 0]
   ];
   document.getElementById('statsCards').innerHTML = cards.map(function(item) {
     return '<div class="card"><div class="label">' + esc(item[0]) + '</div><div class="value">' + esc(item[1]) + '</div></div>';
@@ -976,12 +992,55 @@ function closeModal() {
   document.getElementById('modal').classList.remove('open');
 }
 
+async function loadPushOnline() {
+  const res = await api('/admin/api/push/online');
+  const data = await res.json();
+  document.getElementById('pushStatus').textContent = '在线：' + (data.count || 0);
+  const tbody = document.getElementById('pushOnlineBody');
+  const items = data.items || [];
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="7">暂无长连接在线</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map(function(c) {
+    const xy = (c.map ? ('(' + (c.x || 0) + ',' + (c.y || 0) + ')') : '-');
+    return '<tr><td>' + esc(c.acc) + '</td><td>' + esc(c.nick || '-') + '</td><td>' +
+      esc(c.map || '-') + '</td><td>' + esc(xy) + '</td><td>' + esc(c.peer) + '</td><td>' +
+      esc(c.connected_at_text || c.connected_at) + '</td><td>' +
+      esc(c.last_active_text || c.last_active) + '</td></tr>';
+  }).join('');
+}
+
+async function sendPush() {
+  const acc = document.getElementById('pushAcc').value.trim();
+  const msg = document.getElementById('pushMsg').value.trim() || 'hello';
+  if (!acc) {
+    showMsg('请输入账号');
+    return;
+  }
+  const res = await api('/admin/api/push/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ acc: acc, msg: msg })
+  });
+  const data = await res.json().catch(function() { return {}; });
+  if (!res.ok || !data.ok) {
+    showMsg(data.error || ('推送失败 HTTP ' + res.status));
+    return;
+  }
+  showMsg('已推送到 ' + acc + '：' + msg);
+  loadPushOnline();
+}
+
 document.querySelectorAll('.tab').forEach(function(btn) {
   btn.onclick = function() {
     document.querySelectorAll('.tab').forEach(function(x) { x.classList.remove('active'); });
     document.querySelectorAll('.panel').forEach(function(x) { x.classList.remove('active'); });
     btn.classList.add('active');
     document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'push') {
+      loadPushOnline();
+    }
   };
 });
 
@@ -997,6 +1056,8 @@ document.getElementById('btnRefreshGlobalMail').onclick = loadGlobalMail;
 document.getElementById('btnDeleteGlobalMail').onclick = deleteGlobalMail;
 document.getElementById('btnSaveUpdate').onclick = saveUpdate;
 document.getElementById('btnRefreshUpdate').onclick = loadUpdate;
+document.getElementById('btnRefreshPush').onclick = loadPushOnline;
+document.getElementById('btnPushSend').onclick = sendPush;
 document.getElementById('btnLoadUpdateJson').onclick = loadUpdateJsonFile;
 document.getElementById('btnSaveUpdateJson').onclick = saveUpdateJsonFile;
 document.getElementById('btnUploadApk').onclick = uploadApk;

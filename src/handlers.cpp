@@ -29,6 +29,9 @@ using json = nlohmann::json;
 TtlCache<std::string, json> g_init_data_cache(512);
 constexpr auto kInitDataCacheTtl = std::chrono::seconds(30);
 constexpr int kMaxSaveArea = 66;
+// 临时关闭：getInitData 不再用客户端 apk_md5 与服务端基准比对触发镇压(bl)。
+// 恢复校验时改回 true。管理端 bl-force / bl-exempt 不受影响。
+constexpr bool kEnableApkMd5BlCheck = false;
 
 template <typename Loader>
 json cached_init_data(const std::string& key, Loader&& loader) {
@@ -474,8 +477,8 @@ json handle_get_init_data(const json& req, int /*ver*/, const std::string& chann
   if (storage::is_bl_forced(acc)) {
     md5_suppressed = true;
     std::cerr << "[getInitData] bl forced acc=" << acc << std::endl;
-  } else if (!storage::is_bl_exempt(acc) && server_apk_md5.size() == 32 &&
-             !client_apk_md5.empty()) {
+  } else if (kEnableApkMd5BlCheck && !storage::is_bl_exempt(acc) &&
+             server_apk_md5.size() == 32 && !client_apk_md5.empty()) {
     md5_suppressed = client_apk_md5 != server_apk_md5;
     if (md5_suppressed) {
       std::cerr << "[getInitData] apk md5 mismatch, bl=1 acc=" << acc

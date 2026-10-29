@@ -6,6 +6,7 @@
 
 #include "jh/crypto.hpp"
 #include "jh/mail.hpp"
+#include "jh/push_hub.hpp"
 #include "jh/save_blob.hpp"
 #include "jh/save_crypto.hpp"
 #include "jh/storage.hpp"
@@ -146,6 +147,8 @@ void register_routes(gateway::Router& server, const ServerConfig& config) {
         {"next_id", stats.next_id},
         {"host", config.host},
         {"port", config.port},
+        {"push_port", config.push_port},
+        {"push_online", push_hub::online_count()},
         {"game_version", config.game_version},
         {"plat", config.plat},
         {"data_dir", config.data_dir},
@@ -721,6 +724,51 @@ void register_routes(gateway::Router& server, const ServerConfig& config) {
       }
     }
     res.set_content(out.dump(2), "application/json; charset=utf-8");
+  });
+
+  server.Get("/admin/api/push/online", [](const httplib::Request&, httplib::Response& res) {
+    json items = json::array();
+    for (const auto& client : push_hub::list_online()) {
+      items.push_back({{"acc", client.acc},
+                       {"peer", client.peer},
+                       {"map", client.map},
+                       {"nick", client.nick},
+                       {"x", client.x},
+                       {"y", client.y},
+                       {"connected_at", client.connected_at},
+                       {"connected_at_text", format_time(client.connected_at)},
+                       {"last_active", client.last_active},
+                       {"last_active_text", format_time(client.last_active)}});
+    }
+    res.set_content(json{{"count", items.size()}, {"items", items}}.dump(),
+                    "application/json; charset=utf-8");
+  });
+
+  server.Post("/admin/api/push/send", [](const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+      body = json::parse(req.body.empty() ? "{}" : req.body);
+    } catch (...) {
+      res.status = 400;
+      res.set_content(R"({"error":"invalid json"})", "application/json; charset=utf-8");
+      return;
+    }
+    const std::string acc = body.value("acc", "");
+    const std::string msg = body.value("msg", "hello");
+    if (acc.empty()) {
+      res.status = 400;
+      res.set_content(R"({"error":"acc required"})", "application/json; charset=utf-8");
+      return;
+    }
+    std::string error;
+    if (!push_hub::push_to_acc(acc, msg, &error)) {
+      res.status = 404;
+      res.set_content(json{{"ok", false}, {"error", error}}.dump(),
+                      "application/json; charset=utf-8");
+      return;
+    }
+    res.set_content(json{{"ok", true}, {"acc", acc}, {"msg", msg}}.dump(),
+                    "application/json; charset=utf-8");
   });
 
   update::register_admin_routes(server, config);

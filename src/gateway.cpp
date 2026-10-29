@@ -470,6 +470,7 @@ int serve(const ServerConfig& config) {
   std::cout << "JH game server listening on http://" << config.host << ":" << config.port << "/\n"
             << "  Gateway: /admin -> admin, /update -> update, POST /{action} -> game\n"
             << "  Admin panel: http://127.0.0.1:" << config.port << "/admin\n"
+            << "  push_port: " << config.push_port << "\n"
             << "  game_version(ver): " << config.game_version << "\n"
             << "  mysql: " << config.mysql.host << ":" << config.mysql.port << "/"
             << config.mysql.database << "\n"

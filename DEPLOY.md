@@ -27,6 +27,9 @@ WorkingDirectory=/opt/jh-server
 
 健康检查：`http://127.0.0.1:18080/health`（对外同端口）。
 
+长连接推送（注入 SO）：默认 **TCP `18081`**（配置项 `push_port`，`0` 关闭）。  
+安全组 / 防火墙需放行 `18081/tcp`；管理后台「长连接推送」页可查看在线并发送测试消息。
+
 ---
 
 ## 2. 两份 doc.json（必读）
@@ -279,6 +282,20 @@ D:\server\
 
 ---
 
-## 11. 一句话规范
+## 11. 论剑期数固定（lunjian_pin.json）
+
+`/opt/jh-server/data/lunjian_pin.json` 存在时，论剑池子和榜单固定在该期，不随每周一 04:00 自动换期：
+
+```json
+{"week_id":20745}
+```
+
+- 只在收到明确指令时修改或删除该文件，改完 `systemctl restart jh-server` 生效。
+- 删除文件 = 恢复按自然周自动换期。
+- 启动日志 `[lunjian] week=... pinned=...` 可确认当前期数。
+
+---
+
+## 12. 一句话规范
 
 **发版用 `deploy.ps1`（或不碰 doc 的二进制热更）；改表用管理后台上传；论剑要新表再解密同步 `data/doc.json`；动 saves 后保持 `jh-server` 属主。**

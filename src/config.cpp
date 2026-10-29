@@ -238,6 +238,12 @@ ServerConfig load_config(int argc, char** argv) {
         cfg.port = j["port"].get<int>();
 
       }
+      if (j.contains("push_port")) {
+        cfg.push_port = j["push_port"].get<int>();
+      }
+      if (j.contains("push_max_conns")) {
+        cfg.push_max_conns = j["push_max_conns"].get<int>();
+      }
 
       if (j.contains("game_version")) {
 
@@ -330,6 +336,8 @@ ServerConfig load_config(int argc, char** argv) {
 
       cfg.port = std::stoi(argv[i + 1]);
 
+    } else if (std::string(argv[i]) == "--push-port") {
+      cfg.push_port = std::stoi(argv[i + 1]);
     } else if (std::string(argv[i]) == "--version") {
 
       cfg.game_version = std::stoi(argv[i + 1]);

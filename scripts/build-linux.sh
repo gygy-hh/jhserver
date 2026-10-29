@@ -28,6 +28,7 @@ g++ -std=c++17 -O1 -g0 \
   "$ROOT"/src/update.cpp \
   "$ROOT"/src/lunjian_pool.cpp \
   "$ROOT"/src/lunjian.cpp \
+  "$ROOT"/src/push_hub.cpp \
   "$ROOT"/src/static_nss.cpp \
   -L/usr/lib/x86_64-linux-gnu \
   -Wl,--wrap=getaddrinfo \

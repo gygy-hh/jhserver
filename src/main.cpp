@@ -4,6 +4,7 @@
 #include "jh/gateway.hpp"
 #include "jh/lunjian.hpp"
 #include "jh/mail.hpp"
+#include "jh/push_hub.hpp"
 #include "jh/save_crypto.hpp"
 #include "jh/storage.hpp"
 #include "jh/update.hpp"
@@ -37,5 +38,12 @@ int main(int argc, char** argv) {
   auth_cfg.min_password_len = config.min_password_len;
   jh::auth_init(auth_cfg);
 
-  return jh::gateway::serve(config);
+  if (!jh::push_hub::start(config)) {
+    std::cerr << "Failed to start push hub on port " << config.push_port << "\n";
+    return 1;
+  }
+
+  const int code = jh::gateway::serve(config);
+  jh::push_hub::stop();
+  return code;
 }

@@ -26,6 +26,7 @@ add_executable(jh_server
   src/update.cpp
   src/lunjian_pool.cpp
   src/lunjian.cpp
+  src/push_hub.cpp
 )
 
 add_executable(test_lunjian_pool

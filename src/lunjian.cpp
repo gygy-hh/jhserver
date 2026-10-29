@@ -10,6 +10,7 @@
 #include <filesystem>
 
 #include <algorithm>
+#include <fstream>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -51,6 +52,8 @@ constexpr int kFightDataVer = 4;
 std::mutex g_mu;
 Catalog g_catalog;
 WeekPool g_pool;
+// data/lunjian_pin.json {"week_id":N}：存在时池子和榜单固定在该期，不随每周一 04:00 自动换期。
+int64_t g_pinned_week = 0;
 bool g_ready = false;
 std::string g_error = "论剑配置未加载";
 std::unordered_map<std::string, std::string> g_ver;
@@ -456,12 +459,36 @@ json pool_json(const WeekPool& pool) {
                     {"btn_skill", json{{"screen", "equip"}, {"ui", "ui_char_equipchange.csb"}}}}}};
 }
 
+int64_t load_pinned_week(const std::string& data_dir) {
+  std::ifstream in(data_dir + "/lunjian_pin.json");
+  if (!in) {
+    return 0;
+  }
+  const json pin = json::parse(in, nullptr, false);
+  if (!pin.is_object()) {
+    throw std::runtime_error("lunjian_pin.json invalid");
+  }
+  const int64_t week = pin.value("week_id", static_cast<int64_t>(0));
+  if (week <= 0) {
+    throw std::runtime_error("lunjian_pin.json week_id invalid");
+  }
+  return week;
+}
+
 void refresh_pool() {
-  const int64_t week = week_id_at(now_unix());
+  const int64_t natural = week_id_at(now_unix());
+  const int64_t week = g_pinned_week > 0 ? g_pinned_week : natural;
   if (g_pool.week_id == week && !g_pool.chars.empty()) {
     return;
   }
   g_pool = build_week_pool(g_catalog, week);
+  if (g_pinned_week > 0) {
+    // 固定期的结束时间顺延到自然周末尾，避免客户端倒计时显示已结束。
+    int64_t begin = 0;
+    int64_t end = 0;
+    week_bounds(natural, begin, end);
+    g_pool.end_unix = std::max(g_pool.end_unix, end);
+  }
   auto graded = [](const std::vector<PoolItem>& items) {
     int count = 0;
     int star = 0;
@@ -1732,11 +1759,13 @@ void init(const std::string& data_dir) {
       doc_path = find_resource_path("data/doc.json");
     }
     g_catalog = load_catalog(doc_path);
+    g_pinned_week = load_pinned_week(data_dir);
     g_pool = {};
     refresh_pool();
     g_ready = true;
     g_error.clear();
-    std::cerr << "[lunjian] week=" << g_pool.week_id << " chars=" << g_pool.chars.size()
+    std::cerr << "[lunjian] week=" << g_pool.week_id << " pinned=" << g_pinned_week
+              << " chars=" << g_pool.chars.size()
               << " equips=" << g_pool.equips.size() << " grade=" << g_pool.equip_grade
               << " skills=" << g_pool.skills.size() << " grade=" << g_pool.skill_grade
               << " nei=" << g_pool.neis.size() << " grade=" << g_pool.nei_grade << "\n";
